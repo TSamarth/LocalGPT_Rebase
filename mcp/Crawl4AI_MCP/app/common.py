@@ -14,9 +14,11 @@ from app.prompts.research import deep_research_plan
 from app.resources.static import get_capabilities, get_status
 from app.tools.adaptive_crawl import adaptive_crawl
 from app.tools.crawl import crawl_many, crawl_url
+from app.tools.dedup import dedup_pages
 from app.tools.deep_crawl import deep_crawl
 from app.tools.discover import discover_urls
 from app.tools.search import get_crawl_stats, search_chunks
+from app.tools.seed import ingest_seeds
 from app.tools.triage import score_and_triage_urls
 from app.utils import ToolResponse
 
@@ -56,6 +58,8 @@ def register_all(mcp: FastMCP) -> None:
     _register_tool(mcp, crawl_many)
     _register_tool(mcp, deep_crawl)
     _register_tool(mcp, adaptive_crawl)
+    _register_tool(mcp, ingest_seeds)
+    _register_tool(mcp, dedup_pages)
     _register_tool(mcp, search_chunks)
     _register_tool(mcp, get_crawl_stats)
 

@@ -26,6 +26,7 @@ import httpx
 from fastmcp import Context
 
 from app.config import config
+from app.domain import registrable_domain
 from app.tools.triage import score_and_triage_urls
 
 # Sources that need no key / flag and are safe to run by default.
@@ -274,7 +275,7 @@ async def discover_urls(
 
     Returns (triage=False):
         {
-          "urls": [{"url", "title", "snippet", "source", "also_in": [...]}, ...],
+          "urls": [{"url", "title", "snippet", "source", "etld1", "also_in": [...]}, ...],
           "by_source": {source: count},
           "errors": {source: message},
           "stats": {"total": int, "sources_used": [...]},
@@ -316,6 +317,7 @@ async def discover_urls(
                     continue
                 entry = dict(hit)
                 entry["url"] = canon
+                entry["etld1"] = registrable_domain(canon)
                 entry.setdefault("also_in", [])
                 merged[canon] = entry
                 count += 1
