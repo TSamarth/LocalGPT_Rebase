@@ -151,6 +151,33 @@ class Config:
         default_factory=lambda: _env("LLM_EXTRACTION_ENABLED", "false").lower() == "true"
     )
 
+    # ── Per-domain rate-limit + backoff (T2.5) ───────────────────────────────
+    # Minimum spacing (seconds) between requests to the SAME registrable domain
+    # (eTLD+1) during deep crawls. 0 disables per-domain throttling.
+    PER_DOMAIN_RATE_LIMIT_SEC: float = field(
+        default_factory=lambda: _env_float("PER_DOMAIN_RATE_LIMIT_SEC", 1.0)
+    )
+    # 429 / transient-failure retry policy: max attempts and exponential backoff base.
+    RATE_LIMIT_MAX_RETRIES: int = field(
+        default_factory=lambda: _env_int("RATE_LIMIT_MAX_RETRIES", 3)
+    )
+    RATE_LIMIT_BACKOFF_BASE_SEC: float = field(
+        default_factory=lambda: _env_float("RATE_LIMIT_BACKOFF_BASE_SEC", 2.0)
+    )
+
+    # ── Content-similarity dedup (T2.2) ──────────────────────────────────────
+    # Cosine ≥ threshold collapses syndicated/mirrored pages into one canonical.
+    # Must match the orchestrator Verifier's INDEPENDENCE_COSINE_THRESHOLD.
+    DEDUP_COSINE_THRESHOLD: float = field(
+        default_factory=lambda: _env_float("DEDUP_COSINE_THRESHOLD", 0.92)
+    )
+
+    # ── Seed-URL / file ingest (T2.3) ────────────────────────────────────────
+    # Directory under which user-supplied seed files may be read for ingest.
+    SEED_INGEST_DIR: str = field(
+        default_factory=lambda: _env("SEED_INGEST_DIR", "./data/seeds")
+    )
+
     def ensure_data_dirs(self) -> None:
         """Create data directories if they don't exist."""
         Path(self.CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)

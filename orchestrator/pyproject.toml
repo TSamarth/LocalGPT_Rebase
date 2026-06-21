@@ -5,6 +5,7 @@ description = "Local A2A deep-research pipeline (Google ADK + Ollama + crawl4ai 
 requires-python = ">=3.11"
 dependencies = [
     "google-adk>=0.3.0",
+    "litellm>=1.0",  # ADK LiteLlm backend → talks to local Ollama
     "ollama>=0.6.1",
     "pydantic>=2.9",
     "python-dotenv>=1.2.2",
@@ -20,6 +21,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]

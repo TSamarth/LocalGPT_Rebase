@@ -107,6 +107,28 @@ class Config:
         default_factory=lambda: _env_int("TARGET_EVIDENCE_DEEP", 5)
     )
 
+    # ── Semantic Scholar citation BFS (T1.6 / T2.6, architecture.md §3.4, §11) ──
+    # httpx async client (orchestrator/app/citation.py) — NOT an MCP tool. Called
+    # directly by the Acquirer for depth=deep academic sources.
+    S2_API_BASE_URL: str = field(
+        default_factory=lambda: _env("S2_API_BASE_URL", "https://api.semanticscholar.org/graph/v1")
+    )
+    # Optional key raises rate limits; courtesy delay applies regardless. Mirrors
+    # the MCP server's SEMANTIC_SCHOLAR_API_KEY (same upstream API).
+    S2_API_KEY: str = field(default_factory=lambda: _env("S2_API_KEY", ""))
+    # Courtesy delay (seconds) between citation-graph hops to respect rate limits.
+    S2_RATE_DELAY_SEC: float = field(
+        default_factory=lambda: _env_float("S2_RATE_DELAY_SEC", 1.0)
+    )
+    # Citation BFS depth (hops) from a seed academic paper. 2 = paper → refs → refs-of-refs.
+    CITATION_BFS_HOPS: int = field(
+        default_factory=lambda: _env_int("CITATION_BFS_HOPS", 2)
+    )
+    # LLM relevance score (0–1) a discovered citation must clear to be followed.
+    CITATION_RELEVANCE_THRESHOLD: float = field(
+        default_factory=lambda: _env_float("CITATION_RELEVANCE_THRESHOLD", 0.7)
+    )
+
     def ensure_data_dirs(self) -> None:
         """Create session/report directories if they don't exist."""
         Path(self.SESSIONS_DIR).mkdir(parents=True, exist_ok=True)
