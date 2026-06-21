@@ -7,6 +7,7 @@ artifact is JSON-serialisable so the session store can persist/resume it.
 """
 from __future__ import annotations
 
+from datetime import date
 from enum import Enum
 from typing import List, Optional
 
@@ -46,6 +47,20 @@ class ClaimStatus(str, Enum):
     KEPT = "kept"                    # corroborated by >=2 independent sources
     FLAGGED = "flagged"              # independent sources contradict each other
     UNCORROBORATED = "uncorroborated"  # only one source
+
+
+class ConflictType(str, Enum):
+    """Classification of a flagged contradiction (FR5.5, architecture.md §12.1)."""
+    FACTUAL = "factual"                # genuine disagreement on fact
+    METHODOLOGICAL = "methodological"  # differ due to method/data, not fact
+    TEMPORAL_DRIFT = "temporal_drift"  # field evolved over time, not a real conflict (FR5.6)
+
+
+class TemporalStatus(str, Enum):
+    """Recency label on a claim when temporal drift is detected (FR5.6, §12.2)."""
+    CURRENT = "current"      # backed by the newer source
+    DATED = "dated"          # backed by the older source
+    UNCERTAIN = "uncertain"  # publication_date missing → cannot classify
 
 
 class Stage(str, Enum):
@@ -88,14 +103,32 @@ class ScoredURL(BaseModel):
     source: str = ""                       # discovery source that found it
     also_in: List[str] = Field(default_factory=list)  # other sources (cross-source signal)
     etld1: str = ""                        # registrable domain — used for independence test
+    # ── T0.4 enrichment (citation BFS / date metadata, architecture.md §3.4, §11) ──
+    publication_date: Optional[date] = None  # from Semantic Scholar/arXiv metadata; feeds temporal drift
+    citation_refs: List[str] = Field(default_factory=list)  # paper IDs followed during citation BFS
 
 
 # ── Verifier artifacts (FR5) ──────────────────────────────────────────────────
 class SourceRef(BaseModel):
-    """A single source backing (or contradicting) a claim, with its evidence quote."""
+    """A single source backing a claim, with its evidence quote."""
     url: str
     etld1: str = ""
     quote: str = ""
+    publication_date: Optional[date] = None  # T0.4: propagated from chunk metadata for temporal drift
+
+
+class Contradiction(BaseModel):
+    """A source that contradicts a claim, scored by the Verifier (FR5.5, §12.1).
+
+    Superset of SourceRef fields plus contradiction scoring, so legacy
+    contradiction JSON (url/etld1/quote only) still validates against defaults.
+    """
+    url: str
+    etld1: str = ""
+    quote: str = ""
+    publication_date: Optional[date] = None
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)  # 0–1, three-tier rubric
+    conflict_type: ConflictType = ConflictType.FACTUAL
 
 
 class Claim(BaseModel):
@@ -104,8 +137,9 @@ class Claim(BaseModel):
     subtopic_id: str
     text: str
     status: ClaimStatus
+    temporal_status: Optional[TemporalStatus] = None  # T0.4: set only on temporal-drift claims (FR5.6)
     sources: List[SourceRef] = Field(default_factory=list)
-    contradictions: List[SourceRef] = Field(default_factory=list)
+    contradictions: List[Contradiction] = Field(default_factory=list)
 
 
 class ClaimLedger(BaseModel):

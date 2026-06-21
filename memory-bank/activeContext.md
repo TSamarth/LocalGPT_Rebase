@@ -1,7 +1,7 @@
 # Active Context
 
 ## Current Phase
-**Story 1 (Foundation) — DONE + tested.** Schemas, config, session store, scaffold. 14 tests green. Pre-Story-2 schema extension required before agents consume schemas. Then Story 2 (MCP extensions) on critical path.
+**Story 1 + T0.4 (Gate G1) — DONE + tested.** Schemas, config, session store, scaffold + schema extension (publication_date/citation_refs/temporal_status + Contradiction scoring model + ConflictType/TemporalStatus enums + TEMPORAL_DRIFT_THRESHOLD_MONTHS). All additions optional + backward compatible. 19 tests green. Gate G1 cleared → Story 2 (MCP extensions) unblocked, on critical path.
 
 ## Current Focus
 `orchestrator/` package created (sibling to `mcp/`). Foundation = `app/schemas.py` (Pydantic contracts), `app/config.py`, `app/session.py` (create/resume + artifact persistence). Validated via local .venv + main.py smoke run.

@@ -90,6 +90,11 @@ class Config:
     INDEPENDENCE_COSINE_THRESHOLD: float = field(
         default_factory=lambda: _env_float("INDEPENDENCE_COSINE_THRESHOLD", 0.92)
     )
+    # Temporal drift (FR5.6, §12.2): publication_date gap (months) at/above which a
+    # contradiction is classified temporal_drift instead of factual. Default 18 months.
+    TEMPORAL_DRIFT_THRESHOLD_MONTHS: int = field(
+        default_factory=lambda: _env_int("TEMPORAL_DRIFT_THRESHOLD_MONTHS", 18)
+    )
 
     # ── Adaptive depth → target_evidence per subtopic ──────────────────────────
     TARGET_EVIDENCE_SHALLOW: int = field(
