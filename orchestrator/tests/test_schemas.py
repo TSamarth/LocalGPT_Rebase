@@ -1,10 +1,10 @@
 """Schema contract tests — JSON roundtrip, validation, ledger helpers."""
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
-
-from datetime import date
 
 from app.schemas import (
     Claim,
