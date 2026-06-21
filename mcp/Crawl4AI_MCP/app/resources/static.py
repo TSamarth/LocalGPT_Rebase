@@ -108,11 +108,21 @@ Confidence-based exploration using AdaptiveCrawler. Automatically follows
 the most relevant links until target confidence is reached. Best for
 open-ended research with unknown content distribution.
 
-### 7. `search_chunks`
+### 7. `ingest_seeds`
+Force user-provided URLs and local files into the corpus, bypassing discovery
+and triage. URLs are crawled; local files (under SEED_INGEST_DIR) are read and
+stored directly. Guarantees the supplied sources appear in storage and search.
+
+### 8. `dedup_pages`
+Collapse syndicated/mirrored pages. Compares stored pages by cosine similarity
+of their mean chunk embedding; pages ≥ DEDUP_COSINE_THRESHOLD are folded into the
+earliest-crawled canonical page (the rest get a `duplicate_of` link).
+
+### 9. `search_chunks`
 Semantic search over stored research chunks via ChromaDB + Ollama embeddings.
 Call this to retrieve relevant context for synthesis after crawling.
 
-### 8. `get_crawl_stats`
+### 10. `get_crawl_stats`
 Returns SQLite and ChromaDB storage statistics: sessions, pages, chunks,
 top-scoring pages by quality score.
 

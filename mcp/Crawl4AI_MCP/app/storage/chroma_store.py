@@ -157,6 +157,31 @@ class ChromaStore:
             )
         return output
 
+    def get_mean_vector(self, chunk_ids: List[str]) -> Optional[List[float]]:
+        """Return the element-wise mean of the stored embeddings for chunk_ids.
+
+        Used as a page-level representative vector for content-similarity dedup.
+        Returns None when no embeddings are available (e.g. ids not found).
+        """
+        if not chunk_ids:
+            return None
+        col = self._get_collection()
+        try:
+            res = col.get(ids=list(chunk_ids), include=["embeddings"])
+        except Exception as e:
+            logger.warning("get_mean_vector failed: %s", e)
+            return None
+        embs = res.get("embeddings")
+        if embs is None or len(embs) == 0:
+            return None
+        dim = len(embs[0])
+        sums = [0.0] * dim
+        for vec in embs:
+            for i, v in enumerate(vec):
+                sums[i] += float(v)
+        n = len(embs)
+        return [s / n for s in sums]
+
     def count(self) -> int:
         try:
             return self._get_collection().count()

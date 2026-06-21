@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from crawl4ai import (
     AsyncWebCrawler,
@@ -29,6 +31,8 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from fastmcp import Context
 
 from app.config import config
+from app.domain import registrable_domain
+from app.ratelimit import crawl_with_retry, get_rate_limiter
 from app.storage.chroma_store import get_chroma
 from app.storage.chunker import chunk_text
 from app.storage.sqlite_store import get_store
@@ -49,6 +53,41 @@ def _build_llm_extraction_strategy(query: Optional[str] = None) -> LLMExtraction
         input_format="fit_markdown",
         extra_args={"temperature": 0.0, "max_tokens": 800},
     )
+
+
+# arXiv abstract pages (…/abs/…) are HTML and crawl fine; only the PDF endpoints
+# (…/pdf/…) and plain *.pdf URLs need the PDF processor for faithful extraction.
+_ARXIV_PDF_RE = re.compile(r"arxiv\.org/pdf/", re.IGNORECASE)
+
+
+def _is_pdf_url(url: str) -> bool:
+    """True when a URL points at a PDF that the browser renderer would mangle.
+
+    The default (browser) crawl of a PDF yields little or no usable markdown.
+    Routing these through Crawl4AI's PDF processor recovers the real text.
+    """
+    try:
+        path = urlsplit(url).path.lower()
+    except Exception:
+        return False
+    return path.endswith(".pdf") or bool(_ARXIV_PDF_RE.search(url))
+
+
+async def _crawl_pdf(url: str) -> Any:
+    """Crawl a PDF URL using Crawl4AI's PDF processor (not the browser).
+
+    Produces real extracted text as markdown, fixing the lossy browser path for
+    arXiv/PDF sources.
+    """
+    from crawl4ai.processors.pdf import PDFContentScrapingStrategy, PDFCrawlerStrategy
+
+    run_cfg = CrawlerRunConfig(
+        scraping_strategy=PDFContentScrapingStrategy(),
+        cache_mode=get_cache_mode(config.CACHE_MODE),
+        verbose=False,
+    )
+    async with AsyncWebCrawler(crawler_strategy=PDFCrawlerStrategy()) as crawler:
+        return await crawler.arun(url, config=run_cfg)
 
 
 def _build_run_config(
@@ -119,6 +158,7 @@ def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, se
     if not isinstance(blocks, list):
         blocks = [blocks]
 
+    etld1 = registrable_domain(url)
     chunk_ids: List[str] = []
     chunk_texts: List[str] = []
     metadatas: List[Dict] = []
@@ -148,6 +188,7 @@ def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, se
             "chunk_index": str(i),
             "strategy": strategy,
             "page_id": page_id,
+            "etld1": etld1,
             "extraction": "llm",
         })
 
@@ -229,6 +270,7 @@ async def _persist_result(
                     "chunk_text": text,
                     "token_count": len(text.split()),
                     "chroma_doc_id": cid,
+                    "etld1": m.get("etld1", ""),
                 }
                 for cid, text, m in zip(chunk_ids, chunk_texts_list, metadatas)
             ]
@@ -239,6 +281,7 @@ async def _persist_result(
         chunks = chunk_text(fit_md)
         if chunks:
             chroma = get_chroma()
+            etld1 = registrable_domain(result.url)
             chunk_ids = [make_id() for _ in chunks]
             c_texts = [c.text for c in chunks]
             metadatas = [
@@ -250,6 +293,7 @@ async def _persist_result(
                     "chunk_index": str(c.chunk_index),
                     "strategy": strategy,
                     "page_id": page_id,
+                    "etld1": etld1,
                     "extraction": config.CHUNKING_STRATEGY,
                 }
                 for c in chunks
@@ -266,6 +310,7 @@ async def _persist_result(
                     "chunk_text": c.text,
                     "token_count": c.token_count,
                     "chroma_doc_id": cid,
+                    "etld1": etld1,
                 }
                 for cid, c in zip(chunk_ids, chunks)
             ]
@@ -366,20 +411,30 @@ async def crawl_url(
 
     llm_extract = use_llm_extraction if use_llm_extraction is not None else config.LLM_EXTRACTION_ENABLED
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=not take_screenshot, light_mode=True)
-    run_cfg = _build_run_config(
-        query=query,
-        css_selector=css_selector,
-        excluded_tags=excluded_tags,
-        cache_mode_str=cache_mode,
-        take_screenshot=take_screenshot,
-        wait_for=wait_for,
-        js_code=js_code,
-        use_llm_extraction=llm_extract,
-    )
+    # Per-domain politeness: space out requests to the same eTLD+1.
+    await get_rate_limiter().acquire(url)
 
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
-        result = await crawler.arun(url, config=run_cfg)
+    if _is_pdf_url(url):
+        # PDF/arXiv: route through the PDF processor for faithful text extraction.
+        result = await crawl_with_retry(lambda: _crawl_pdf(url), ctx=ctx)
+    else:
+        browser_cfg = BrowserConfig(headless=True, text_mode=not take_screenshot, light_mode=True)
+        run_cfg = _build_run_config(
+            query=query,
+            css_selector=css_selector,
+            excluded_tags=excluded_tags,
+            cache_mode_str=cache_mode,
+            take_screenshot=take_screenshot,
+            wait_for=wait_for,
+            js_code=js_code,
+            use_llm_extraction=llm_extract,
+        )
+
+        async def _do() -> Any:
+            async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                return await crawler.arun(url, config=run_cfg)
+
+        result = await crawl_with_retry(_do, ctx=ctx)
 
     page_id = await _persist_result(result, session_id, "crawl_url", query)
 

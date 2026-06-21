@@ -17,6 +17,7 @@ from crawl4ai import AdaptiveCrawler, AsyncWebCrawler, BrowserConfig
 from fastmcp import Context
 
 from app.config import config
+from app.domain import registrable_domain
 from app.storage.chroma_store import get_chroma
 from app.storage.chunker import chunk_text
 from app.storage.sqlite_store import get_store
@@ -144,6 +145,7 @@ async def adaptive_crawl(
 
                         chunks = chunk_text(fit_md)
                         if chunks:
+                            etld1 = registrable_domain(url)
                             chunk_ids = [make_id() for _ in chunks]
                             try:
                                 chroma.add_chunks(
@@ -158,6 +160,7 @@ async def adaptive_crawl(
                                             "chunk_index": str(c.chunk_index),
                                             "strategy": "adaptive_crawl",
                                             "page_id": page_id,
+                                            "etld1": etld1,
                                             "extraction": config.CHUNKING_STRATEGY,
                                         }
                                         for c in chunks
@@ -173,6 +176,7 @@ async def adaptive_crawl(
                                     "chunk_text": c.text,
                                     "token_count": c.token_count,
                                     "chroma_doc_id": cid,
+                                    "etld1": etld1,
                                 }
                                 for cid, c in zip(chunk_ids, chunks)
                             ]

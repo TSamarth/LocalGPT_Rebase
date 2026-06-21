@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS crawled_pages (
     error           TEXT,
     crawled_at      TEXT NOT NULL,
     metadata        TEXT,
+    duplicate_of    TEXT,
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(id)
 );
 
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_text    TEXT NOT NULL,
     token_count   INTEGER DEFAULT 0,
     chroma_doc_id TEXT,
+    etld1         TEXT DEFAULT '',
     created_at    TEXT NOT NULL,
     FOREIGN KEY (page_id) REFERENCES crawled_pages(id)
 );
@@ -82,6 +84,16 @@ class SQLiteStore:
         """Create tables if they don't exist."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.executescript(CREATE_TABLES_SQL)
+            # Migration: add chunks.etld1 to pre-existing databases.
+            async with db.execute("PRAGMA table_info(chunks)") as cur:
+                cols = {row[1] for row in await cur.fetchall()}
+            if "etld1" not in cols:
+                await db.execute("ALTER TABLE chunks ADD COLUMN etld1 TEXT DEFAULT ''")
+            # Migration: add crawled_pages.duplicate_of to pre-existing databases.
+            async with db.execute("PRAGMA table_info(crawled_pages)") as cur:
+                page_cols = {row[1] for row in await cur.fetchall()}
+            if "duplicate_of" not in page_cols:
+                await db.execute("ALTER TABLE crawled_pages ADD COLUMN duplicate_of TEXT")
             await db.commit()
 
     # ── Sessions ────────────────────────────────────────────────────────────
@@ -175,22 +187,65 @@ class SQLiteStore:
     # ── Chunks ───────────────────────────────────────────────────────────────
 
     async def save_chunks(self, page_id: str, chunks: List[Dict]) -> None:
-        """chunks: list of {id, chunk_index, chunk_text, token_count, chroma_doc_id}"""
+        """chunks: list of {id, chunk_index, chunk_text, token_count, chroma_doc_id, etld1}"""
         if not chunks:
             return
         async with aiosqlite.connect(self.db_path) as db:
             await db.executemany(
                 """INSERT OR IGNORE INTO chunks
-                   (id, page_id, chunk_index, chunk_text, token_count, chroma_doc_id, created_at)
-                   VALUES (?,?,?,?,?,?,?)""",
+                   (id, page_id, chunk_index, chunk_text, token_count, chroma_doc_id, etld1, created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
                 [
                     (
                         c["id"], page_id, c["chunk_index"], c["chunk_text"],
                         c.get("token_count", 0), c.get("chroma_doc_id"),
+                        c.get("etld1", ""),
                         datetime.utcnow().isoformat(),
                     )
                     for c in chunks
                 ],
+            )
+            await db.commit()
+
+    # ── Dedup ────────────────────────────────────────────────────────────────
+
+    async def list_pages_with_chunks(self, session_id: Optional[str] = None) -> List[Dict]:
+        """List successful, non-duplicate pages with their chroma_doc_ids.
+
+        Returns [{page_id, url, title, chroma_doc_ids: [...]}], ordered oldest
+        first (so the earliest crawl is the natural canonical). Pages already
+        marked as a duplicate are excluded.
+        """
+        where = "WHERE p.success = 1 AND p.duplicate_of IS NULL"
+        params: tuple = ()
+        if session_id:
+            where += " AND p.session_id = ?"
+            params = (session_id,)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT id, url, title FROM crawled_pages p {where} ORDER BY crawled_at ASC",
+                params,
+            ) as cur:
+                pages = [dict(r) for r in await cur.fetchall()]
+            out: List[Dict] = []
+            for pg in pages:
+                async with db.execute(
+                    "SELECT chroma_doc_id FROM chunks WHERE page_id = ? ORDER BY chunk_index ASC",
+                    (pg["id"],),
+                ) as cur:
+                    ids = [r[0] for r in await cur.fetchall() if r[0]]
+                out.append(
+                    {"page_id": pg["id"], "url": pg["url"], "title": pg["title"], "chroma_doc_ids": ids}
+                )
+        return out
+
+    async def mark_duplicate(self, page_id: str, canonical_page_id: str) -> None:
+        """Record that page_id is a mirror of canonical_page_id."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE crawled_pages SET duplicate_of = ? WHERE id = ?",
+                (canonical_page_id, page_id),
             )
             await db.commit()
 
