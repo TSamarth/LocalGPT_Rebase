@@ -1,0 +1,53 @@
+[project]
+name = "crawl4ai-mcp"
+version = "0.1.0"
+description = "Crawl4AI FastMCP server for agentic deep research with Google ADK"
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "chromadb>=1.5.8",
+    "crawl4ai>=0.8.6",
+    "ddgs>=9.0.0",
+    "fastmcp>=3.2.4",
+    "httpx>=0.27.0",
+    "ollama>=0.6.1",
+    "python-dotenv>=1.2.2",
+    "tiktoken>=0.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.9.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+# Vendored skill/example content — not part of this project's source.
+extend-exclude = [".claude", "memory-bank"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes, I: isort, B: bugbear
+# (UP/pyupgrade intentionally omitted — the codebase uses Optional/List/Dict typing.)
+select = ["E", "W", "F", "I", "B"]
+# E501 (line length) is noisy for long URLs/instructions; B905 would change zip() semantics.
+ignore = ["E501", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests/e2e may shadow fixtures, import for side effects, or leave call results unused.
+"tests/*" = ["F811", "F401", "F841"]
+"e2e_test.py" = ["F401", "F841"]
+
