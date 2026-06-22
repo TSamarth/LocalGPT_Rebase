@@ -1,10 +1,10 @@
 # Active Context
 
 ## Current Phase
-**Story 1 + T0.4 (Gate G1) — DONE + tested.** Schemas, config, session store, scaffold + schema extension (publication_date/citation_refs/temporal_status + Contradiction scoring model + ConflictType/TemporalStatus enums + TEMPORAL_DRIFT_THRESHOLD_MONTHS). All additions optional + backward compatible. 19 tests green. Gate G1 cleared → Story 2 (MCP extensions) unblocked, on critical path.
+**Story 2 (MCP extensions) + Story 3 agents (3.1/3.2/3.3/3.5/3.7) — DONE + tested** via parallel git-worktree build (Wave 0 foundation → Wave A 6 parallel tracks, octopus-merged to `dev`, pushed). orchestrator **114** tests green, MCP **43** green, ruff clean. **Wave B deferred**: Acquirer (T3.4) + Verifier (T3.6) — deps merged, both unblocked.
 
 ## Current Focus
-`orchestrator/` package created (sibling to `mcp/`). Foundation = `app/schemas.py` (Pydantic contracts), `app/config.py`, `app/session.py` (create/resume + artifact persistence). Validated via local .venv + main.py smoke run.
+Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ollama), deterministic stage machine + orchestrator skeleton (INTAKE→DONE, deep-only CP3 via `ResearchPhase.MID_ACQUIRE`), 4 agents (Clarifier/Planner/Extractor/Writer), Semantic Scholar citation client (`app/citation.py`), and Story 2 MCP extensions (eTLD+1, dedup, seed ingest, PDF routing, rate-limit backoff). All agent tests run offline (mocked/stubbed model). Next: Wave B (Acquirer + Verifier) wires the research loop's acquire + verify ends.
 
 ## Recent Decisions (from brainstorm)
 - Verification = cross-corroborate-or-flag (no per-claim confidence scoring required).
@@ -22,11 +22,12 @@
 - **Tool access**: only Acquirer/Extractor hold MCP write tools (least privilege).
 - Open questions Q1–Q6 all resolved in [architecture.md] (model fit, independent-source = eTLD+1 + cosine<0.92, MCP 5 extensions, resume via stage.json, stop-rule, CLI checkpoints).
 
-## Next Steps
-1. **Schema extension** (pre-Story-2, immediate): add optional fields to `ScoredURL` (`publication_date`, `citation_refs`) and `Claim` (`temporal_status`); add `confidence_score` + `conflict_type` to contradiction records. All optional with defaults → 14 existing tests still pass.
-2. **Run setup probe on real hardware**: `cd orchestrator && python scripts/check_setup.py` — pull Qwen2.5-14B-Q4 (or 8B fallback) + nomic-embed-text; confirm VRAM < 14 GB (Gate G2).
-3. **Story 2** — crawl4ai MCP extensions. Critical path = T1.1 eTLD+1 → T1.2 dedup (unblock Verifier). Also add T1.6 (Semantic Scholar citation graph client).
-4. Before Story 3: full `uv sync` (installs google-adk) — verify ADK on Python 3.13.
+## Next Steps (Wave B + integration)
+1. **T3.6 Verifier** (`app/agents/verifier.py`) — deps 2.1+2.2 merged. Independence test (eTLD+1 + cosine < 0.92), 3-tier contradiction confidence, temporal-drift detection (TEMPORAL_DRIFT_THRESHOLD_MONTHS), `ClaimLedger` assembly. Long pole.
+2. **T3.4 Acquirer** (`app/agents/acquirer.py`) — deps 2.1+2.3+2.6 merged. MCP discover+triage + citation BFS (academic + deep only, 2-hop, relevance ≥ 0.7 via `citation.py`).
+3. **Add `mcp` ADK extra** to `orchestrator/pyproject.toml` before the live MCP/Extractor path (currently lazy-imported so offline tests pass).
+4. **Run setup probe on real hardware**: `cd orchestrator && python scripts/check_setup.py` — pull Qwen2.5-14B-Q4 (or 8B fallback) + nomic-embed-text; confirm VRAM < 14 GB (Gate G2).
+5. After Wave B: Story 4 (checkpoint CLI + CP1/CP2/CP3 wiring) and Story 5 (research loop + stop-rule + adaptive depth).
 
 ## Active Considerations
 - 16 GB RAM binding constraint, not VRAM → sequential execution structural.

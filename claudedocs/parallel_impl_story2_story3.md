@@ -1,5 +1,13 @@
 # Story 2 + Story 3 — Parallel Implementation Plan
 
+> **STATUS (2026-06-22): Wave 0 + Wave A COMPLETE, merged to `dev`, pushed.**
+> Wave 0 (foundation: `llm.py`, `stage_machine.py`, `orchestrator.py`, config keys, deps) + Wave A
+> (6 parallel worktree tracks: Story 2 MCP T1.1–T1.6, agents T3.2/T3.3/T3.5/T3.7) octopus-merged.
+> orchestrator **114** tests green, MCP **43** green, ruff clean. Zero merge conflicts (shared surfaces
+> pre-staged in Wave 0, read-only after). **Wave B PENDING**: T3.4 Acquirer + T3.6 Verifier — deps now
+> merged, both unblocked; T3.6 is the long pole. Integration TODO: add `mcp` ADK extra to
+> `orchestrator/pyproject.toml` for the live MCPToolset/Extractor path (currently lazy-imported).
+
 ## Context
 
 Story 1 (schemas, config, session store, ADK scaffold) is **DONE** — Gate G1 cleared,

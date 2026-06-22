@@ -21,44 +21,44 @@ Goal: schemas + runnable ADK app + model verified. Unblocks everything.
 | 1.2 ADK app scaffold + config/env + pyproject | T0.2 | ✅ DONE |
 | 1.3 Pull Qwen2.5-14B-Q4 + embed, verify VRAM < 14 GB | T0.2 | user must run probe |
 | 1.4 Session store + resume (stage.json) | T0.3 | ✅ DONE |
-| 1.5 **Schema extension** (pre-Story-2): add `publication_date`, `citation_refs` to `ScoredURL`; `temporal_status` to `Claim`; `confidence_score`+`conflict_type` to contradiction records | T0.4 | next action |
+| 1.5 **Schema extension** (pre-Story-2): `publication_date`+`citation_refs` on `ScoredURL`; `publication_date` on `SourceRef`; `temporal_status` on `Claim`; new `Contradiction` model w/ `confidence_score`+`conflict_type`; `ConflictType`/`TemporalStatus` enums; `TEMPORAL_DRIFT_THRESHOLD_MONTHS` config | T0.4 | ✅ DONE (19 tests, backward compat) |
 
-**Gate G1** schemas frozen (after 1.5) · **G2** model fits VRAM (user runs 1.3).
+**Gate G1** schemas frozen (after 1.5) — ✅ CLEARED · **G2** model fits VRAM (user runs 1.3).
 
 ---
 
-## STORY 2 — crawl4ai MCP Extensions  `[parallel track, own files]`
+## STORY 2 — crawl4ai MCP Extensions  `[DONE ✅ — Wave A, 2026-06-22]`
 Goal: dedup + provenance + robustness + Semantic Scholar client. Two tasks on critical path.
 
-| Task | Maps to | Delegate | Strategy |
+| Task | Maps to | Delegate | Status / file |
 |------|------|----------|----------|
-| 2.1 eTLD+1 field in discover + chunk metadata | T1.1 | `/sc:implement` | **critical path** |
-| 2.2 Content-similarity dedup (cosine ≥0.92) | T1.2 | `/sc:implement` | **critical path**, after 2.1 |
-| 2.3 Seed-URL/file ingest path | T1.3 | `/sc:implement` | parallel |
-| 2.4 PDF/arXiv extraction quality fix | T1.4 | `/sc:troubleshoot` → `/sc:improve` | parallel, independent |
-| 2.5 Per-domain rate-limit + backoff | T1.5 | `/sc:implement` | parallel, independent |
-| 2.6 **Semantic Scholar citation graph API client** (`orchestrator/app/citation.py`): `get_paper_metadata(id)` → `{publication_date, references, citers}`. httpx async, not an MCP tool. | T1.6 | `/sc:implement` | parallel, after 1.5 (schema ext) |
-| 2.7 MCP extension tests (in-memory Client) + Semantic Scholar client tests | T5.2 | `/sc:test` | per-task |
+| 2.1 eTLD+1 field in discover + chunk metadata | T1.1 | `/sc:implement` | ✅ `app/domain.py` + SQLite `chunks.etld1` |
+| 2.2 Content-similarity dedup (cosine ≥0.92) | T1.2 | `/sc:implement` | ✅ `tools/dedup.py` + `crawled_pages.duplicate_of` |
+| 2.3 Seed-URL/file ingest path | T1.3 | `/sc:implement` | ✅ `tools/seed.py` (registered in `common.py`) |
+| 2.4 PDF/arXiv extraction quality fix | T1.4 | `/sc:troubleshoot` → `/sc:improve` | ✅ routing in `crawl.py`/`adaptive_crawl.py` |
+| 2.5 Per-domain rate-limit + backoff | T1.5 | `/sc:implement` | ✅ `app/ratelimit.py` |
+| 2.6 **Semantic Scholar citation graph API client** (`orchestrator/app/citation.py`): `get_paper_metadata(id)` → `{publication_date, references, citers}`. httpx async, not an MCP tool. | T1.6 | `/sc:implement` | ✅ `app/citation.py` (`CitationClient`, BFS, id parsing) |
+| 2.7 MCP extension tests (in-memory Client) + Semantic Scholar client tests | T5.2 | `/sc:test` | ✅ `test_story2.py` (15) + `test_citation.py` (35) |
 
-**Gate G3** dedup collapses mirror set, eTLD+1 populated, seeds ingested, Semantic Scholar client returns metadata.
+**Gate G3** dedup collapses mirror set, eTLD+1 populated, seeds ingested, Semantic Scholar client returns metadata — ✅ CLEARED (MCP 43 tests green; orchestrator 114 green).
 
 ---
 
-## STORY 3 — Agent Layer  `[parallel after S1]`
+## STORY 3 — Agent Layer  `[Wave 0 + Wave A done; 3.4 + 3.6 deferred to Wave B]`
 Goal: orchestrator + 6 specialists. Verifier is long pole.
 
-| Task | Maps to | Delegate | Strategy |
+| Task | Maps to | Delegate | Status / file |
 |------|------|----------|----------|
-| 3.1 Orchestrator + stage machine skeleton (spike ADK A2A; includes MID_ACQUIRE stage for CP3) | T2.1 | `/sc:implement` | after S1; spike early |
-| 3.2 Clarifier agent | T2.2 | `/sc:implement` | parallel |
-| 3.3 Planner agent + adaptive depth | T2.3 | `/sc:implement` | parallel |
-| 3.4 Acquirer agent (MCP discover+triage + citation BFS via T1.6 for academic+deep plans, 2-hop, relevance-gated) | T2.4 | `/sc:implement` | after 2.1, 2.3, 2.6 |
-| 3.5 Extractor agent (MCP crawl_* + propagate `publication_date` from ScoredURL to chunk metadata) | T2.5 | `/sc:implement` | after 1.5 (schema ext) |
-| 3.6 **Verifier** agent + independence test + ClaimLedger + contradiction confidence scoring (3-tier) + temporal drift detection | T2.6 | `/sc:implement` | **after 2.1+2.2** (blocked) |
-| 3.7 Writer agent + coverage check + temporal drift sub-section | T2.7 | `/sc:implement` | after 1.5 |
-| 3.8 Per-agent unit tests (mock model) | T5.1 | `/sc:test` | per-agent |
+| 3.1 Orchestrator + stage machine skeleton (spike ADK A2A; includes MID_ACQUIRE stage for CP3) | T2.1 | `/sc:implement` | ✅ `orchestrator.py` + `stage_machine.py` + `llm.py` factory (Wave 0) |
+| 3.2 Clarifier agent | T2.2 | `/sc:implement` | ✅ `agents/clarifier.py` (20 tests) |
+| 3.3 Planner agent + adaptive depth | T2.3 | `/sc:implement` | ✅ `agents/planner.py` (13 tests) |
+| 3.4 Acquirer agent (MCP discover+triage + citation BFS via T1.6 for academic+deep plans, 2-hop, relevance-gated) | T2.4 | `/sc:implement` | ⏳ **Wave B** — deps 2.1+2.3+2.6 merged, unblocked |
+| 3.5 Extractor agent (MCP crawl_* + propagate `publication_date` from ScoredURL to chunk metadata) | T2.5 | `/sc:implement` | ✅ `agents/extractor.py`, date passthrough (9 tests) |
+| 3.6 **Verifier** agent + independence test + ClaimLedger + contradiction confidence scoring (3-tier) + temporal drift detection | T2.6 | `/sc:implement` | ⏳ **Wave B** — deps 2.1+2.2 merged, unblocked. Long pole |
+| 3.7 Writer agent + coverage check + temporal drift sub-section | T2.7 | `/sc:implement` | ✅ `agents/writer.py`, coverage + drift split (9 tests) |
+| 3.8 Per-agent unit tests (mock model) | T5.1 | `/sc:test` | ✅ done per merged agent |
 
-**Gate G4** each agent isolated-green.
+**Gate G4** each agent isolated-green — ✅ for 3.1/3.2/3.3/3.5/3.7 (offline mocked model). Pending 3.4 + 3.6 (Wave B).
 
 ---
 
@@ -108,7 +108,7 @@ No gates defined yet — scope and design TBD when MVP is stable.
 ## Execution Waves (adaptive coordination)
 
 ```
-WAVE 1  ║ [S1 DONE] S1.5 schema-ext │ S2.1 S2.3 S2.4 S2.5 S2.6(S2 API)  (parallel)
+WAVE 1  ║ [S1 + S1.5 DONE ✅] │ S2.1 S2.3 S2.4 S2.5 S2.6(S2 API)  (parallel; G1 cleared)
 WAVE 2  ║ S2.2 dedup │ S3.2 S3.3 S3.5 S3.7                               (agents fan out)
 WAVE 3  ║ S3.1 orchestrator │ S3.6 Verifier │ S4.1 CLI                   (Verifier unblocked)
 WAVE 4  ║ S4.2 → S4.3(CP3) → S5.1 → S5.2 → S5.3                        (sequential integration)
@@ -116,8 +116,8 @@ WAVE 5  ║ S6.1 S6.2 (parallel) → S6.3                                    (va
 WAVE 6  ║ S7.1 S7.2                                                       (post-MVP, deferred)
 ```
 
-**Critical path:** S1.5 → S2.1 → S2.2 → S3.6 → S5.1 → S5.2 → S6.1.
-S1.5 (schema ext, S effort) + S2.1 start together; S2.6 (Semantic Scholar client) parallel in Wave 1.
+**Critical path:** ~~S1.5~~ ✅ → **S2.1** (head now) → S2.2 → S3.6 → S5.1 → S5.2 → S6.1.
+S1.5 (schema ext) done — G1 cleared, schemas frozen. S2.6 (Semantic Scholar client) now unblocked, parallel in Wave 1.
 
 ---
 
@@ -131,4 +131,4 @@ S1.5 (schema ext, S effort) + S2.1 start together; S2.6 (Semantic Scholar client
 
 ---
 
-**Next step**: execute Wave 1. Start `/sc:implement` on **S1.1 (schemas)** — head of critical path.
+**Next step**: Wave 1 in progress — S1 + S1.5 ✅ done (G1 cleared). Start `/sc:implement` on **S2.1 (eTLD+1 field)** — head of critical path → then S2.2 (dedup, unblocks Verifier). S2.6 (Semantic Scholar client) can run parallel. User still owes S1.3 probe (G2).
