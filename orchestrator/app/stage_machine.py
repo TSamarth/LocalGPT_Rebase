@@ -6,7 +6,7 @@ contract. The research loop runs *inside* ``Stage.RESEARCH`` as a sequence of
 phases (acquire → [mid-acquire CP3] → extract → verify); CP3 only fires on a
 deep plan. Phases live here, not in the frozen ``Stage`` enum, so the contract
 stays stable while the orchestrator still models the loop + the deep-only
-checkpoint (architecture.md §4, CLAUDE.md stage machine).
+checkpoint (architecture.md §4, CONTEXT.md stage machine).
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class ResearchPhase(str, Enum):
     """Sub-phases of one research-loop pass inside ``Stage.RESEARCH``.
 
     MID_ACQUIRE is the CP3 mid-acquisition checkpoint — it is only visited when
-    the plan depth is ``deep`` (FR / CLAUDE.md CP3).
+    the plan depth is ``deep`` (FR / CONTEXT.md CP3).
     """
     ACQUIRE = "acquire"
     MID_ACQUIRE = "mid_acquire"  # CP3 — deep plans only
