@@ -52,13 +52,13 @@ Goal: orchestrator + 6 specialists. Verifier is long pole.
 | 3.1 Orchestrator + stage machine skeleton (spike ADK A2A; includes MID_ACQUIRE stage for CP3) | T2.1 | `/sc:implement` | ✅ `orchestrator.py` + `stage_machine.py` + `llm.py` factory (Wave 0) |
 | 3.2 Clarifier agent | T2.2 | `/sc:implement` | ✅ `agents/clarifier.py` (20 tests) |
 | 3.3 Planner agent + adaptive depth | T2.3 | `/sc:implement` | ✅ `agents/planner.py` (13 tests) |
-| 3.4 Acquirer agent (MCP discover+triage + citation BFS via T1.6 for academic+deep plans, 2-hop, relevance-gated) | T2.4 | `/sc:implement` | ⏳ **Wave B** — deps 2.1+2.3+2.6 merged, unblocked |
+| 3.4 Acquirer agent (MCP discover+triage + citation BFS via T1.6 for academic+deep plans, 2-hop, relevance-gated) | T2.4 | `/sc:implement` | ✅ `agents/acquirer.py` (19 tests) — Wave B |
 | 3.5 Extractor agent (MCP crawl_* + propagate `publication_date` from ScoredURL to chunk metadata) | T2.5 | `/sc:implement` | ✅ `agents/extractor.py`, date passthrough (9 tests) |
-| 3.6 **Verifier** agent + independence test + ClaimLedger + contradiction confidence scoring (3-tier) + temporal drift detection | T2.6 | `/sc:implement` | ⏳ **Wave B** — deps 2.1+2.2 merged, unblocked. Long pole |
+| 3.6 **Verifier** agent + independence test + ClaimLedger + contradiction confidence scoring (3-tier) + temporal drift detection | T2.6 | `/sc:implement` | ✅ `agents/verifier.py` (32 tests) — Wave B |
 | 3.7 Writer agent + coverage check + temporal drift sub-section | T2.7 | `/sc:implement` | ✅ `agents/writer.py`, coverage + drift split (9 tests) |
 | 3.8 Per-agent unit tests (mock model) | T5.1 | `/sc:test` | ✅ done per merged agent |
 
-**Gate G4** each agent isolated-green — ✅ for 3.1/3.2/3.3/3.5/3.7 (offline mocked model). Pending 3.4 + 3.6 (Wave B).
+**Gate G4** each agent isolated-green — ✅ ALL six specialists green (3.1/3.2/3.3/3.4/3.5/3.6/3.7, offline mocked model). Wave B (3.4 + 3.6) merged 2026-06-22.
 
 ---
 

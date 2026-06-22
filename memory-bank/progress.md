@@ -1,6 +1,6 @@
 # Progress
 
-## Status: Story 2 (MCP extensions) + Story 3 agents (3.1/3.2/3.3/3.5/3.7) done via parallel worktree build. orchestrator 114 tests green, MCP 43 tests green. Wave B (Acquirer 3.4 + Verifier 3.6) deferred.
+## Status: Story 2 (MCP extensions) + Story 3 ALL six agents done. Wave B (Acquirer 3.4 + Verifier 3.6) landed 2026-06-22 via parallel subagents. orchestrator 165 tests green, MCP 43 tests green. Story 3 complete → Story 4 (checkpoints) + Story 5 (research loop) next.
 
 ## What Works (exists today)
 - crawl4ai MCP server at `mcp/Crawl4AI_MCP/`: full pipeline — discover_urls (SerpAPI+DDG+arXiv+SemanticScholar+GoogleSERP), score_and_triage_urls, crawl_url/many/deep/adaptive, search_chunks, get_crawl_stats. SQLite + ChromaDB + Ollama embeddings. ADK MCPToolset integration designed.
@@ -35,6 +35,10 @@
   - T3.5 Extractor: `agents/extractor.py` — `build_extractor(toolset)`, `chunk_metadata_for` (publication_date passthrough, no inference), `STRATEGY_TOOL_NAMES`; lazy-imports `MCPToolset`. (9 tests.)
   - T3.7 Writer: `agents/writer.py` — `build_writer`, `coverage_report`, `split_contradictions` (temporal-drift separated from factual), `render_report`. (9 tests.)
   - **orchestrator suite: 114 tests green.**
+- **Wave B — Story 3 long-pole agents (`orchestrator/app/agents/`, 2026-06-22, 2 parallel subagents, disjoint new files)**:
+  - T3.4 Acquirer: `agents/acquirer.py` — MCP tool agent (`build_acquirer`, `tool_filter=[discover_urls, score_and_triage_urls]`, `output_schema=None` like Extractor). `should_run_citation_bfs` (academic AND deep only), `enrich_with_citations` (drives `citation.py` `CitationClient.bfs`, sets `publication_date`+`citation_refs`, dedups), `parse_scored_urls`, injectable async `acquire`. (19 tests.)
+  - T3.6 Verifier (trust core): `agents/verifier.py` — deterministic policy (pure, model-free): `are_independent`/`count_independent_sources` (diff etld1 AND cosine < 0.92), `classify_claim_status` (kept ≥2 independent / flagged / uncorroborated), `score_contradiction` (3-tier additive rubric 0–0.33 each → [0,1]), `classify_conflict` (≥18mo gap → TEMPORAL_DRIFT + dated/current, missing date → UNCERTAIN), `enrich_ledger`, `parse_ledger`, injectable async `verify`. `build_verifier` reasoning-only (`output_schema=ClaimLedger`) or with injected `search_chunks` toolset (schema dropped). (32 tests.)
+  - **orchestrator suite: 165 tests green** (114 + 19 + 32). ruff clean. Schemas/config/llm/citation untouched (all keys pre-existed).
 - **Build mechanics**: 6 parallel git-worktree subagents off the Wave 0 commit, disjoint new-file ownership (shared surfaces pre-staged in Wave 0, read-only after), octopus-merged to `dev`. ruff clean. Commit author/committer emails rewritten yahoo → GitHub noreply (push protection); pushed to origin/dev.
 
 ## What's Defined (planning)
@@ -60,9 +64,9 @@
   - [x] Shared one-hot model factory — `app/llm.py` (Wave 0, ADK→Ollama spike)
   - [x] Clarifier agent (T3.2)
   - [x] Planner agent (T3.3)
-  - [ ] **Acquirer agent (T3.4) — DEFERRED to Wave B** (+citation BFS, 2-hop, relevance-gated, deep plans only). Deps 2.1+2.3+2.6 now merged → unblocked.
+  - [x] **Acquirer agent (T3.4)** — `agents/acquirer.py` (+citation BFS, 2-hop, relevance-gated, deep+academic only). Wave B.
   - [x] Extractor agent (T3.5) (+publication_date propagation to chunk metadata)
-  - [ ] **Verifier agent (T3.6) — DEFERRED to Wave B** (+independence test eTLD+1+cosine, +contradiction confidence scoring, +temporal drift detection, +ClaimLedger assembly). Deps 2.1+2.2 now merged → unblocked. Long pole.
+  - [x] **Verifier agent (T3.6)** — `agents/verifier.py` (+independence test eTLD+1+cosine, +contradiction confidence scoring 3-tier, +temporal drift detection, +ClaimLedger assembly). Wave B.
   - [x] Writer agent (T3.7) (+temporal drift sub-section in contradictions appendix)
 - [ ] **Story 4** — Checkpoint gates:
   - [ ] Checkpoint CLI (approve/edit/reject, $EDITOR)
@@ -86,4 +90,5 @@
 - 2026-06-21: T0.4 schema extension (Gate G1) done — added optional date/citation/temporal/contradiction-scoring fields + `Contradiction` model + 2 enums + config threshold. Backward compatible; 19 tests green. Unblocks Story 2.
 - 2026-06-21: Competitive research (vs. Firecrawl) + brainstorm. Added P1 citation BFS (2-hop, relevance-gated, deep plans only), P2 contradiction confidence scoring, P4 temporal drift detection, P5 CP3 (deep only). Deferred P3 knowledge graph + P6 session comparison to Story 7. Schema extension needed pre-Story-2. T1.6 Semantic Scholar API client added to Story 2.
 - 2026-06-22: Parallel build of Story 2 + Story 3 via git worktrees. **Wave 0** (serial): shared `llm.py` factory (ADK→Ollama spike), `stage_machine.py`, `orchestrator.py` skeleton, config keys in both packages, deps. **Wave A** (6 parallel worktree subagents, disjoint new files, octopus-merged): Story 2 MCP extensions (T1.1–T1.6) + agents T3.2/T3.3/T3.5/T3.7. orchestrator 114 + MCP 43 tests green, ruff clean. Conflict-free via pre-staging all shared mutable surfaces in Wave 0 (read-only after). **Wave B deferred**: Acquirer (T3.4) + Verifier (T3.6) — deps now merged, both unblocked.
+- 2026-06-22: **Wave B** — Acquirer (T3.4) + Verifier (T3.6) built by 2 parallel python-expert subagents, disjoint new files (`acquirer.py`/`test_acquirer.py`, `verifier.py`/`test_verifier.py`), no shared surface touched (schemas/config/llm/citation frozen, all keys pre-existed). Verifier policy kept pure/deterministic (independence, 3-tier confidence, temporal drift) — LLM judges content only. orchestrator 165 tests green, ruff clean. **Story 3 complete; G4 cleared for all six specialists.** Next: Story 4 checkpoints + Story 5 research loop (wire Acquire→Extract→Verify).
 - 2026-06-22: Rewrote 9 unpushed commit emails yahoo → GitHub noreply (`47295533+TSamarth@users.noreply.github.com`) to clear push protection; local `user.email` set to noreply; pushed origin/dev (fast-forward).
