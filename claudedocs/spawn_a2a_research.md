@@ -44,7 +44,7 @@ Goal: dedup + provenance + robustness + Semantic Scholar client. Two tasks on cr
 
 ---
 
-## STORY 3 — Agent Layer  `[Wave 0 + Wave A done; 3.4 + 3.6 deferred to Wave B]`
+## STORY 3 — Agent Layer  `[DONE ✅ — Wave 0 + Wave A + Wave B, 2026-06-22]`
 Goal: orchestrator + 6 specialists. Verifier is long pole.
 
 | Task | Maps to | Delegate | Status / file |
@@ -62,14 +62,15 @@ Goal: orchestrator + 6 specialists. Verifier is long pole.
 
 ---
 
-## STORY 4 — Human-in-Loop Checkpoints  `[after orchestrator]`
-| Task | Maps to | Delegate | Strategy |
+## STORY 4 — Human-in-Loop Checkpoints  `[DONE ✅ — 2026-06-22]`
+| Task | Maps to | Delegate | Status / file |
 |------|------|----------|----------|
-| 4.1 Checkpoint CLI (approve/edit/reject, $EDITOR, blocking) | T3.1 | `/sc:implement` | after 3.1 |
-| 4.2 Wire CP1 (plan) + CP2 (draft) into stage machine | T3.2 | `/sc:implement` | after 4.1, 3.3, 3.7 |
-| 4.3 **CP3 mid-acquisition checkpoint** (`depth=deep` only): show source list + theme clusters; handle `[+]add/[-]exclude/[r]redirect` → supplemental Acquirer pass before Extractor | T3.3 | `/sc:implement` | after 4.1, 3.4, 3.1 |
+| 4.1 Checkpoint CLI (approve/edit/reject, $EDITOR, blocking) | T3.1 | `/sc:implement` | ✅ `app/checkpoint.py` (`cp1/cp2/cp3_checkpoint` + `Handler` wrappers, `CheckpointRejected`; 11 tests) |
+| 4.2 Wire CP1 (plan) + CP2 (draft) into stage machine | T3.2 | `/sc:implement` | ✅ `post_handlers` in `orchestrator.step()` (CP1→PLAN, CP2→WRITE) |
+| 4.3 **CP3 mid-acquisition checkpoint** (`depth=deep` only): source list + `[+]add/[-]exclude/[r]redirect` → supplemental Acquirer pass before Extractor | T3.3 | `/sc:implement` | ✅ `phase_handlers` in `_run_research_pass()` (CP3→MID_ACQUIRE) + `SessionStore.save/load_scored_urls` |
 
-**Gate G5** CP1/CP2 block until user acts (AC2); CP3 fires on deep plan, skips on shallow/normal.
+**Gate G5** CP1/CP2 block until user acts (AC2); CP3 fires on deep plan, skips on shallow/normal — ✅ CLEARED (`test_cp1/cp2_blocks_until_approve`, `test_cp3_skips_on_shallow_plan` + fires-on-deep; orchestrator 181 tests green).
+**Carry-forward**: checkpoint handlers register into the live composition root at Story 5 (T4.2) alongside real agent wiring — skeleton orchestrator still uses stub handlers, so the mechanism + handlers are landed and G5-tested but not yet active in an end-to-end run.
 
 ---
 
@@ -108,16 +109,16 @@ No gates defined yet — scope and design TBD when MVP is stable.
 ## Execution Waves (adaptive coordination)
 
 ```
-WAVE 1  ║ [S1 + S1.5 DONE ✅] │ S2.1 S2.3 S2.4 S2.5 S2.6(S2 API)  (parallel; G1 cleared)
-WAVE 2  ║ S2.2 dedup │ S3.2 S3.3 S3.5 S3.7                               (agents fan out)
-WAVE 3  ║ S3.1 orchestrator │ S3.6 Verifier │ S4.1 CLI                   (Verifier unblocked)
-WAVE 4  ║ S4.2 → S4.3(CP3) → S5.1 → S5.2 → S5.3                        (sequential integration)
+WAVE 1  ║ [S1 + S1.5 DONE ✅] │ [S2.1 S2.3 S2.4 S2.5 S2.6 DONE ✅]        (G1/G3 cleared)
+WAVE 2  ║ [S2.2 dedup │ S3.2 S3.3 S3.5 S3.7 DONE ✅]                       (agents fanned out)
+WAVE 3  ║ [S3.1 orchestrator │ S3.6 Verifier │ S4.1 CLI DONE ✅]          (G4/G5 cleared)
+WAVE 4  ║ [S4.2 S4.3(CP3) DONE ✅] → S5.1 → S5.2 → S5.3  (head now)        (sequential integration)
 WAVE 5  ║ S6.1 S6.2 (parallel) → S6.3                                    (validation)
 WAVE 6  ║ S7.1 S7.2                                                       (post-MVP, deferred)
 ```
 
-**Critical path:** ~~S1.5~~ ✅ → **S2.1** (head now) → S2.2 → S3.6 → S5.1 → S5.2 → S6.1.
-S1.5 (schema ext) done — G1 cleared, schemas frozen. S2.6 (Semantic Scholar client) now unblocked, parallel in Wave 1.
+**Critical path:** ~~S1.5~~ ✅ → ~~S2.1~~ ✅ → ~~S2.2~~ ✅ → ~~S3.6~~ ✅ → **S5.1** (head now) → S5.2 → S6.1.
+Stories 1–4 done (G1/G3/G4/G5 cleared, schemas frozen). Remaining critical path is the sequential integration chain: research loop (S5.1) → full integration incl. live checkpoint registration (S5.2) → E2E acceptance (S6.1). G2 (VRAM probe) still owed by user.
 
 ---
 
@@ -131,4 +132,4 @@ S1.5 (schema ext) done — G1 cleared, schemas frozen. S2.6 (Semantic Scholar cl
 
 ---
 
-**Next step**: Wave 1 in progress — S1 + S1.5 ✅ done (G1 cleared). Start `/sc:implement` on **S2.1 (eTLD+1 field)** — head of critical path → then S2.2 (dedup, unblocks Verifier). S2.6 (Semantic Scholar client) can run parallel. User still owes S1.3 probe (G2).
+**Next step**: Stories 1–4 ✅ done (G1/G3/G4/G5 cleared, orchestrator 181 + MCP 43 tests green, pushed origin/dev). Start `/sc:implement` on **S5.1 (research loop)** — head of the remaining critical path: wire Acquire→[CP3]→Extract→Verify inside `Stage.RESEARCH` with stop-rule + budget caps, then S5.2 (full integration, incl. registering the Story-4 checkpoint handlers into the composition root). User still owes S1.3 probe (G2, VRAM).

@@ -1,6 +1,6 @@
 # Progress
 
-## Status: Story 2 (MCP extensions) + Story 3 ALL six agents done. Wave B (Acquirer 3.4 + Verifier 3.6) landed 2026-06-22 via parallel subagents. orchestrator 165 tests green, MCP 43 tests green. Story 3 complete → Story 4 (checkpoints) + Story 5 (research loop) next.
+## Status: Story 2 (MCP extensions) + Story 3 (ALL six agents) + Story 4 (checkpoints CP1/CP2/CP3) done. Wave B (Acquirer 3.4 + Verifier 3.6) landed 2026-06-22; Story 4 landed same day. orchestrator 181 tests green, MCP 43 tests green, ruff clean, pushed origin/dev. Story 4 complete → Story 5 (research loop + live checkpoint registration) next.
 
 ## What Works (exists today)
 - crawl4ai MCP server at `mcp/Crawl4AI_MCP/`: full pipeline — discover_urls (SerpAPI+DDG+arXiv+SemanticScholar+GoogleSERP), score_and_triage_urls, crawl_url/many/deep/adaptive, search_chunks, get_crawl_stats. SQLite + ChromaDB + Ollama embeddings. ADK MCPToolset integration designed.
@@ -39,6 +39,12 @@
   - T3.4 Acquirer: `agents/acquirer.py` — MCP tool agent (`build_acquirer`, `tool_filter=[discover_urls, score_and_triage_urls]`, `output_schema=None` like Extractor). `should_run_citation_bfs` (academic AND deep only), `enrich_with_citations` (drives `citation.py` `CitationClient.bfs`, sets `publication_date`+`citation_refs`, dedups), `parse_scored_urls`, injectable async `acquire`. (19 tests.)
   - T3.6 Verifier (trust core): `agents/verifier.py` — deterministic policy (pure, model-free): `are_independent`/`count_independent_sources` (diff etld1 AND cosine < 0.92), `classify_claim_status` (kept ≥2 independent / flagged / uncorroborated), `score_contradiction` (3-tier additive rubric 0–0.33 each → [0,1]), `classify_conflict` (≥18mo gap → TEMPORAL_DRIFT + dated/current, missing date → UNCERTAIN), `enrich_ledger`, `parse_ledger`, injectable async `verify`. `build_verifier` reasoning-only (`output_schema=ClaimLedger`) or with injected `search_chunks` toolset (schema dropped). (32 tests.)
   - **orchestrator suite: 165 tests green** (114 + 19 + 32). ruff clean. Schemas/config/llm/citation untouched (all keys pre-existed).
+- **Story 4 — human-in-loop checkpoints (`orchestrator/app/`, 2026-06-22, inline build)**:
+  - `app/checkpoint.py` (NEW) — pure console flows: `cp1_checkpoint(plan)→ResearchPlan` and `cp2_checkpoint(draft)→str` (approve/edit/reject; edit round-trips through `$EDITOR`/`notepad` temp file + Pydantic re-validate; reject raises `CheckpointRejected`), `cp3_checkpoint(urls)→(filtered, needs_supplemental)` (deep-only source-list inspect: `+add`/`-exclude <n>`/`r redirect`/`d done`; add/redirect set `needs_supplemental`). `Handler` wrappers `cp1/cp2/cp3_handler(orch)` do the `store` I/O. `_launch_editor` + `input` are the only side effects (monkeypatched in tests).
+  - `app/orchestrator.py` — `post_handlers: dict[Stage,Handler]` (fire after a stage; CP1→PLAN, CP2→WRITE) called in `step()`; `phase_handlers: dict[ResearchPhase,Handler]` (fire after a sub-phase; CP3→MID_ACQUIRE) called in `_run_research_pass()`. Both default to `_stub`. CP3 `needs_supplemental` appends `ResearchPhase.ACQUIRE` to `phase_trace` (re-entry hook).
+  - `app/session.py` — `SessionStore.save/load_scored_urls` (`scored_urls.json`) so CP3 can persist its edited candidate list (gap-fill; Acquirer's `OUTPUT_KEY="scored_urls"`).
+  - Tests: `test_checkpoint.py` (11 — CP1/CP2/CP3 flows incl. editor round-trip, invalid-edit fallback, reject) + `test_orchestrator.py` (5 — post/phase handler wiring, CP3 skip on shallow/normal, fire on deep, supplemental re-entry). **orchestrator suite: 181 tests green** (165 + 16). ruff clean.
+  - **Carry-forward**: checkpoint handlers are NOT yet registered in a live composition root (skeleton uses stub handlers); G5 verified by tests that register them directly. Live registration lands with Story 5 integration (T4.2) alongside real agent wiring.
 - **Build mechanics**: 6 parallel git-worktree subagents off the Wave 0 commit, disjoint new-file ownership (shared surfaces pre-staged in Wave 0, read-only after), octopus-merged to `dev`. ruff clean. Commit author/committer emails rewritten yahoo → GitHub noreply (push protection); pushed to origin/dev.
 
 ## What's Defined (planning)
@@ -59,7 +65,7 @@
   - [x] T1.4 PDF quality — arXiv/PDF routing in `crawl.py`/`adaptive_crawl.py`
   - [x] T1.5 Rate-limit backoff — `app/ratelimit.py`
   - [x] T1.6 Semantic Scholar citation graph API client (`orchestrator/app/citation.py`)
-- [ ] **Story 3** — Agent layer (Wave 0 + Wave A done; Wave B deferred):
+- [x] **Story 3** — Agent layer (Wave 0 + Wave A + Wave B done; all six specialists green):
   - [x] Orchestrator + stage machine (MID_ACQUIRE phase for CP3) — `orchestrator.py` + `stage_machine.py` (T3.1)
   - [x] Shared one-hot model factory — `app/llm.py` (Wave 0, ADK→Ollama spike)
   - [x] Clarifier agent (T3.2)
@@ -68,11 +74,12 @@
   - [x] Extractor agent (T3.5) (+publication_date propagation to chunk metadata)
   - [x] **Verifier agent (T3.6)** — `agents/verifier.py` (+independence test eTLD+1+cosine, +contradiction confidence scoring 3-tier, +temporal drift detection, +ClaimLedger assembly). Wave B.
   - [x] Writer agent (T3.7) (+temporal drift sub-section in contradictions appendix)
-- [ ] **Story 4** — Checkpoint gates:
-  - [ ] Checkpoint CLI (approve/edit/reject, $EDITOR)
-  - [ ] Wire CP1 + CP2 into stage machine
-  - [ ] CP3 mid-acquisition checkpoint (deep plans only)
-- [ ] **Story 5** — Research loop + integration + adaptive depth
+- [x] **Story 4** — Checkpoint gates (Gate G5 cleared, 181 tests):
+  - [x] Checkpoint CLI (approve/edit/reject, $EDITOR) — `app/checkpoint.py`
+  - [x] CP1 + CP2 hooks (`post_handlers` on PLAN/WRITE) — `orchestrator.py`
+  - [x] CP3 mid-acquisition checkpoint (deep plans only, `phase_handlers` on MID_ACQUIRE) + `SessionStore.save/load_scored_urls`
+  - [ ] Live registration of checkpoint handlers into composition root — deferred to Story 5 (T4.2)
+- [ ] **Story 5** — Research loop + integration + adaptive depth (incl. live checkpoint registration)
 - [ ] **Story 6** — E2E acceptance (AC1–AC7) + OOM validation
 - [ ] **Story 7** (post-MVP) — Knowledge graph extraction + session comparison
 
@@ -92,3 +99,5 @@
 - 2026-06-22: Parallel build of Story 2 + Story 3 via git worktrees. **Wave 0** (serial): shared `llm.py` factory (ADK→Ollama spike), `stage_machine.py`, `orchestrator.py` skeleton, config keys in both packages, deps. **Wave A** (6 parallel worktree subagents, disjoint new files, octopus-merged): Story 2 MCP extensions (T1.1–T1.6) + agents T3.2/T3.3/T3.5/T3.7. orchestrator 114 + MCP 43 tests green, ruff clean. Conflict-free via pre-staging all shared mutable surfaces in Wave 0 (read-only after). **Wave B deferred**: Acquirer (T3.4) + Verifier (T3.6) — deps now merged, both unblocked.
 - 2026-06-22: **Wave B** — Acquirer (T3.4) + Verifier (T3.6) built by 2 parallel python-expert subagents, disjoint new files (`acquirer.py`/`test_acquirer.py`, `verifier.py`/`test_verifier.py`), no shared surface touched (schemas/config/llm/citation frozen, all keys pre-existed). Verifier policy kept pure/deterministic (independence, 3-tier confidence, temporal drift) — LLM judges content only. orchestrator 165 tests green, ruff clean. **Story 3 complete; G4 cleared for all six specialists.** Next: Story 4 checkpoints + Story 5 research loop (wire Acquire→Extract→Verify).
 - 2026-06-22: Rewrote 9 unpushed commit emails yahoo → GitHub noreply (`47295533+TSamarth@users.noreply.github.com`) to clear push protection; local `user.email` set to noreply; pushed origin/dev (fast-forward).
+- 2026-06-22: **Story 4** — human-in-loop checkpoints (CP1/CP2/CP3) built inline (not worktrees — 4 non-conflicting lines in `orchestrator.py`). New `app/checkpoint.py` (pure console flows + `Handler` wrappers); orchestrator gains `post_handlers` (CP1/CP2 after PLAN/WRITE in `step()`) and `phase_handlers` (CP3 after MID_ACQUIRE in `_run_research_pass()`), both `_stub`-defaulted. **Two plan deviations**: (1) added `SessionStore.save/load_scored_urls` — plan assumed it existed but it didn't; (2) put wiring tests in NEW `test_orchestrator.py` — plan said modify it but orchestrator tests actually lived in `test_stage_machine.py` (left untouched). **Gate G5 cleared**: `test_cp1/cp2_blocks_until_approve`, `test_cp3_skips_on_shallow_plan` (+ fires-on-deep). 181 tests green, ruff clean, pushed origin/dev (2 commits: docs migration + Story 4). Checkpoint handlers register into the live composition root at Story 5 (T4.2); skeleton still stubs.
+- 2026-06-22: Docs migration — added `CONTEXT.md` (project context), slimmed `CLAUDE.md` to behavioral guidelines, removed superseded `claudedocs/parallel_impl_story2_story3.md`, updated `stage_machine.py` docstring refs CLAUDE.md→CONTEXT.md. Note: `claudedocs/story4_checkpoints.md` (Story 4 plan input) was untracked and is no longer on disk — never committed, nothing lost from git.

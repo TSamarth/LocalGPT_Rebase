@@ -1,10 +1,10 @@
 # Active Context
 
 ## Current Phase
-**Story 2 (MCP extensions) + Story 3 agents (3.1/3.2/3.3/3.5/3.7) — DONE + tested** via parallel git-worktree build (Wave 0 foundation → Wave A 6 parallel tracks, octopus-merged to `dev`, pushed). orchestrator **114** tests green, MCP **43** green, ruff clean. **Wave B deferred**: Acquirer (T3.4) + Verifier (T3.6) — deps merged, both unblocked.
+**Story 2 (MCP extensions) + Story 3 (all six agents) + Story 4 (checkpoints) — DONE + tested.** Story 2/3 built via parallel git-worktree build (Wave 0 foundation → Wave A 6 tracks → Wave B Acquirer/Verifier, merged to `dev`). Story 4 (CP1/CP2/CP3) built inline 2026-06-22. orchestrator **181** tests green, MCP **43** green, ruff clean, pushed to origin/dev. **Next: Story 5** — research loop wiring (Acquire→Extract→Verify, stop-rule) + live checkpoint registration into the composition root.
 
 ## Current Focus
-Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ollama), deterministic stage machine + orchestrator skeleton (INTAKE→DONE, deep-only CP3 via `ResearchPhase.MID_ACQUIRE`), 4 agents (Clarifier/Planner/Extractor/Writer), Semantic Scholar citation client (`app/citation.py`), and Story 2 MCP extensions (eTLD+1, dedup, seed ingest, PDF routing, rate-limit backoff). All agent tests run offline (mocked/stubbed model). Next: Wave B (Acquirer + Verifier) wires the research loop's acquire + verify ends.
+Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ollama), deterministic stage machine + orchestrator skeleton (INTAKE→DONE, deep-only CP3 via `ResearchPhase.MID_ACQUIRE`), all six agents (Clarifier/Planner/Acquirer/Extractor/Verifier/Writer), Semantic Scholar citation client (`app/citation.py`), Story 2 MCP extensions (eTLD+1, dedup, seed ingest, PDF routing, rate-limit backoff), and Story 4 checkpoints (`app/checkpoint.py`: `cp1/cp2/cp3_checkpoint` + `Handler` wrappers; `post_handlers`/`phase_handlers` hooks in the orchestrator; `SessionStore.save/load_scored_urls` for CP3's edited source list). All tests run offline (mocked/stubbed model, monkeypatched stdin/editor). **Story 4 nuance**: the checkpoint *mechanism* + handlers landed and are G5-verified by tests that register them directly; registration into the live composition root happens with Story 5 integration (alongside real agent wiring — skeleton still uses stub handlers).
 
 ## Recent Decisions (from brainstorm)
 - Verification = cross-corroborate-or-flag (no per-claim confidence scoring required).
@@ -22,12 +22,12 @@ Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ol
 - **Tool access**: only Acquirer/Extractor hold MCP write tools (least privilege).
 - Open questions Q1–Q6 all resolved in [architecture.md] (model fit, independent-source = eTLD+1 + cosine<0.92, MCP 5 extensions, resume via stage.json, stop-rule, CLI checkpoints).
 
-## Next Steps (Wave B + integration)
-1. **T3.6 Verifier** (`app/agents/verifier.py`) — deps 2.1+2.2 merged. Independence test (eTLD+1 + cosine < 0.92), 3-tier contradiction confidence, temporal-drift detection (TEMPORAL_DRIFT_THRESHOLD_MONTHS), `ClaimLedger` assembly. Long pole.
-2. **T3.4 Acquirer** (`app/agents/acquirer.py`) — deps 2.1+2.3+2.6 merged. MCP discover+triage + citation BFS (academic + deep only, 2-hop, relevance ≥ 0.7 via `citation.py`).
-3. **Add `mcp` ADK extra** to `orchestrator/pyproject.toml` before the live MCP/Extractor path (currently lazy-imported so offline tests pass).
-4. **Run setup probe on real hardware**: `cd orchestrator && python scripts/check_setup.py` — pull Qwen2.5-14B-Q4 (or 8B fallback) + nomic-embed-text; confirm VRAM < 14 GB (Gate G2).
-5. After Wave B: Story 4 (checkpoint CLI + CP1/CP2/CP3 wiring) and Story 5 (research loop + stop-rule + adaptive depth).
+## Next Steps (Story 5 + integration)
+1. **T4.1 Research loop** — wire Acquire→[CP3]→Extract→Verify inside `Stage.RESEARCH` with the stop-rule (target_evidence + diminishing returns + iteration cap) and budget caps. Replace `_run_research_pass`'s phase-walk stub with real agent calls.
+2. **T4.2 Full pipeline integration** — composition root that registers real agents as stage handlers AND registers the checkpoint handlers (`cp1_handler`→`post_handlers[PLAN]`, `cp2_handler`→`post_handlers[WRITE]`, `cp3_handler`→`phase_handlers[MID_ACQUIRE]`). This is where Story 4's mechanism goes live.
+3. **T4.3 Adaptive-depth tie-in** — plan depth → loop budgets / target_evidence / cp3_enabled.
+4. **Add `mcp` ADK extra** to `orchestrator/pyproject.toml` before the live MCP/Extractor path (currently lazy-imported so offline tests pass).
+5. **Run setup probe on real hardware**: `cd orchestrator && python scripts/check_setup.py` — pull Qwen2.5-14B-Q4 (or 8B fallback) + nomic-embed-text; confirm VRAM < 14 GB (Gate G2).
 
 ## Active Considerations
 - 16 GB RAM binding constraint, not VRAM → sequential execution structural.

@@ -33,7 +33,7 @@ ID · task · lens · effort (S/M/L) · depends-on.
 | T0.1 | Artifact schemas (Pydantic): `ResearchPlan`, `ScoredURL`, `ClaimLedger`, `StageState` | backend | M | — | ✅ DONE |
 | T0.2 | Project scaffold: ADK app structure, config/env, `pyproject`, pull Qwen2.5-14B-Q4 + verify VRAM | devops/ML | M | — | ✅ DONE |
 | T0.3 | Session store + resume (`data/sessions/{id}/`, stage.json read/write/skip-done) | backend | M | T0.1 | ✅ DONE |
-| T0.4 | **Schema extension** (pre-Story-2): add optional `publication_date`+`citation_refs` to `ScoredURL`; `temporal_status` to `Claim`; `confidence_score`+`conflict_type` to contradiction records | backend | S | T0.1 | — |
+| T0.4 | **Schema extension** (pre-Story-2): add optional `publication_date`+`citation_refs` to `ScoredURL`; `temporal_status` to `Claim`; `confidence_score`+`conflict_type` to contradiction records | backend | S | T0.1 | ✅ DONE |
 
 ### Phase 1 — crawl4ai MCP extensions (parallel track, independent of agent layer)
 | ID | Task | Lens | Effort | Deps |
