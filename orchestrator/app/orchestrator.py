@@ -42,6 +42,10 @@ class Orchestrator:
         self.handlers: dict[Stage, Handler] = {stage: _stub for stage in Stage}
         if handlers:
             self.handlers.update(handlers)
+        # Post-stage handlers — fire after a stage's work (CP1 on PLAN, CP2 on WRITE).
+        self.post_handlers: dict[Stage, Handler] = {}
+        # Research sub-phase handlers — fire after a phase (CP3 on MID_ACQUIRE).
+        self.phase_handlers: dict[ResearchPhase, Handler] = {}
         # Visited research sub-phases of the current pass (CP3 lands here on deep).
         self.phase_trace: list[ResearchPhase] = []
 
@@ -78,6 +82,7 @@ class Orchestrator:
         else:
             self.handlers[current](self)
 
+        self.post_handlers.get(current, _stub)(self)
         advanced = next_stage(current)
         self.store.set_stage(advanced)
         return advanced
@@ -103,6 +108,7 @@ class Orchestrator:
         phase: Optional[ResearchPhase] = first_phase()
         while phase is not None:
             self.phase_trace.append(phase)
+            self.phase_handlers.get(phase, _stub)(self)
             phase = next_phase(phase, depth=depth)
 
     def _plan_depth(self) -> Depth:

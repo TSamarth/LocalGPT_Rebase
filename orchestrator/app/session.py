@@ -15,12 +15,13 @@ already lives in the MCP's SQLite/ChromaDB, so nothing is re-crawled.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import re
 from pathlib import Path
 from typing import Optional
 
 from .config import config
-from .schemas import ClaimLedger, ResearchPlan, Stage, StageState
+from .schemas import ClaimLedger, ResearchPlan, ScoredURL, Stage, StageState
 
 
 def _now_iso() -> str:
@@ -44,6 +45,7 @@ class SessionStore:
 
     STAGE_FILE = "stage.json"
     PLAN_FILE = "plan.json"
+    SCORED_URLS_FILE = "scored_urls.json"
     LEDGER_FILE = "claim_ledger.json"
     DRAFT_FILE = "draft.md"
 
@@ -95,6 +97,18 @@ class SessionStore:
     def load_plan(self) -> Optional[ResearchPlan]:
         raw = self._read(self.PLAN_FILE)
         return ResearchPlan.model_validate_json(raw) if raw is not None else None
+
+    # ── scored URLs (Acquirer output; CP3 inspects/edits this) ───────────────
+    def save_scored_urls(self, urls: list[ScoredURL]) -> None:
+        payload = [u.model_dump(mode="json") for u in urls]
+        self._write(self.SCORED_URLS_FILE, json.dumps(payload, indent=2))
+
+    def load_scored_urls(self) -> list[ScoredURL]:
+        """Returns [] if none persisted yet."""
+        raw = self._read(self.SCORED_URLS_FILE)
+        if raw is None:
+            return []
+        return [ScoredURL.model_validate(item) for item in json.loads(raw)]
 
     # ── claim ledger ───────────────────────────────────────────────────────
     def save_ledger(self, ledger: ClaimLedger) -> None:
