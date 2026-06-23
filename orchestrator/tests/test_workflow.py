@@ -72,6 +72,41 @@ def _planner_stub() -> object:
     return _stub
 
 
+def _counting_clarifier_stub(counter: list[int]) -> object:
+    """Clarifier stub that records each execution by appending to ``counter``.
+
+    The list-append is the instrumentation: it fires inside the node body, so it
+    only grows when ADK actually *executes* this node. On resume, a completed
+    (``rerun_on_resume=False``) node returns its cached output instead of running
+    its body — so the counter must NOT grow. That is the T5 gate proof.
+    """
+
+    @node
+    async def _stub(node_input: str) -> ClarifyResult:
+        counter.append(1)
+        return ClarifyResult(status="clear", normalized_query="normalized: " + str(node_input).strip())
+
+    return _stub
+
+
+def _counting_planner_stub(counter: list[int]) -> object:
+    """Planner stub that records each execution by appending to ``counter`` (see
+    :func:`_counting_clarifier_stub` for why a body-side counter is the proof)."""
+
+    @node
+    async def _stub(node_input: str) -> ResearchPlan:
+        counter.append(1)
+        return ResearchPlan(
+            subtopics=[
+                Subtopic(id="s1", question=f"angle 1 of {node_input}", target_evidence=99),
+                Subtopic(id="s2", question=f"angle 2 of {node_input}", target_evidence=99),
+            ],
+            depth=Depth.DEEP,
+        )
+
+    return _stub
+
+
 def _build_app(workflow) -> App:
     return App(
         name="test_research",
@@ -218,4 +253,95 @@ async def test_store_write_through_persists_plan():
     assert len(persisted.subtopics) == 2
     assert all(
         s.target_evidence == config.TARGET_EVIDENCE_DEEP for s in persisted.subtopics
+    )
+
+
+# ── Case (c) (T5 — HARD GATE): resume re-runs CP1 only; clarify/plan skipped ────
+async def test_resume_reruns_cp1_only():
+    """The de-risking gate before the E2.S2 loop port.
+
+    This proves ADK's dynamic-workflow auto-checkpointing: when a run is killed at
+    the CP1 ``RequestInput`` pause and later resumed by ``invocation_id``, the
+    already-completed child nodes (clarifier, planner) are NOT re-executed — only
+    the interrupted CP1 path resumes. If resume re-ran clarify/plan, every step
+    would repeat on every checkpoint, which would make the loop port unsafe.
+
+    Proof = body-side call counters. Each counting stub appends to its list when
+    its body executes. We assert each counter is 1 after phase-1 (each ran once to
+    reach CP1) and STILL 1 after resume (NOT 2 — they were checkpoint-skipped).
+
+    Kill/resume modeling: we keep ONE ``InMemoryRunner`` (one ``session_service``,
+    so the in-memory checkpoint state survives) across the kill boundary. The
+    "kill" is abandoning the phase-1 generator at the pause and starting a fresh
+    ``run_async`` resume call — a brand-new runner would lose all checkpoints
+    (amnesia, not a kill). The assertion that matters is the counters, not runner
+    identity: a re-execution would bump them regardless of runner instance.
+    """
+    clarifier_calls: list[int] = []
+    planner_calls: list[int] = []
+    workflow = build_research_workflow(
+        clarifier_node=_counting_clarifier_stub(clarifier_calls),
+        planner_node=_counting_planner_stub(planner_calls),
+    )
+
+    app = _build_app(workflow)
+    runner = InMemoryRunner(app=app)
+    session = await runner.session_service.create_session(
+        app_name=app.name, user_id="test-user"
+    )
+    message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
+
+    # ── Phase 1: run to the CP1 pause (the "kill" point) ───────────────────────
+    interrupt_id = None
+    invocation_id = None
+    async for event in runner.run_async(
+        user_id="test-user", session_id=session.id, new_message=message
+    ):
+        if has_request_input_function_call(event):
+            interrupt_id = get_request_input_interrupt_ids(event)[0]
+            invocation_id = event.invocation_id
+    assert interrupt_id is not None, "workflow did not pause at the CP1 RequestInput"
+    assert invocation_id is not None
+    # Each child node ran exactly once to drive START → CP1.
+    assert clarifier_calls == [1], f"phase-1 clarifier runs != 1: {clarifier_calls}"
+    assert planner_calls == [1], f"phase-1 planner runs != 1: {planner_calls}"
+
+    # ── "Kill": phase-1 generator is abandoned at the pause. We resume on the ──
+    # SAME runner/session_service, so the checkpoint state is intact.
+    approve_plan = ResearchPlan(
+        subtopics=[
+            Subtopic(id="s1", question="angle 1", target_evidence=config.TARGET_EVIDENCE_DEEP),
+            Subtopic(id="s2", question="angle 2", target_evidence=config.TARGET_EVIDENCE_DEEP),
+        ],
+        depth=Depth.DEEP,
+    )
+    reply_part = create_request_input_response(
+        interrupt_id, approve_plan.model_dump(mode="json")
+    )
+    reply = types.Content(role="user", parts=[reply_part])
+
+    # ── Phase 2: resume by invocation_id ───────────────────────────────────────
+    final_output = None
+    async for event in runner.run_async(
+        user_id="test-user",
+        session_id=session.id,
+        invocation_id=invocation_id,
+        new_message=reply,
+    ):
+        if event.output is not None:
+            final_output = event.output
+
+    # ── THE GATE: clarify/plan were auto-checkpoint-skipped on resume ──────────
+    # Counters are STILL 1 (not 2): their bodies did NOT re-execute. Only the CP1
+    # path resumed. If either were 2, the gate FAILS (resume re-ran a child).
+    assert clarifier_calls == [1], f"GATE FAIL: clarifier re-ran on resume: {clarifier_calls}"
+    assert planner_calls == [1], f"GATE FAIL: planner re-ran on resume: {planner_calls}"
+
+    # ── And the resumed run reached a terminal ResearchPlan via the CP1 path. ──
+    assert final_output is not None, "resume did not produce a terminal output"
+    result = ResearchPlan.model_validate(final_output)
+    assert len(result.subtopics) == 2
+    assert result.depth == Depth.DEEP
+    assert all(
+        s.target_evidence == config.TARGET_EVIDENCE_DEEP for s in result.subtopics
     )
