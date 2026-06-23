@@ -63,12 +63,12 @@ ID · task · lens · effort (S/M/L) · depends-on.
 | T3.2 | Wire CP1 (plan) + CP2 (draft) into stage machine | UX/backend | S | T3.1, T2.3, T2.7 |
 | T3.3 | CP3 mid-acquisition checkpoint (`depth=deep` only): show source list + theme clusters; handle `[+]add/[-]exclude/[r]redirect` → supplemental Acquirer pass | UX/backend | M | T3.1, T2.4, T2.1 |
 
-### Phase 4 — Integration
-| ID | Task | Lens | Effort | Deps |
-|----|------|------|--------|------|
-| T4.1 | Research loop wiring (Acquire→[CP3]→Extract→Verify, stop-rule, budget caps) | backend | L | T2.1, T2.4, T2.5, T2.6, T3.3 |
-| T4.2 | Full pipeline integration (all stages end-to-end) | backend | M | T4.1, T2.2, T2.3, T2.7, T3.2 |
-| T4.3 | Adaptive-depth tie-in (plan depth → loop budgets/target_evidence/citation_bfs_enabled/cp3_enabled) | backend/ML | S | T2.3, T4.1 |
+### Phase 4 — Integration  ✅ DONE (2026-06-23)
+| ID | Task | Lens | Effort | Deps | Status |
+|----|------|------|--------|------|--------|
+| T4.1 | Research loop wiring (Acquire→[CP3]→Extract→Verify, stop-rule, budget caps) | backend | L | T2.1, T2.4, T2.5, T2.6, T3.3 | ✅ `app/pipeline.py` `_run_research` + `stage_machine.stop_rule`/`depth_budget` |
+| T4.2 | Full pipeline integration (all stages end-to-end) | backend | M | T4.1, T2.2, T2.3, T2.7, T3.2 | ✅ `app/pipeline.py` `build_orchestrator()`/`run_pipeline()`; 6 agents + CP1/CP2/CP3 wired; `main.py` rewired |
+| T4.3 | Adaptive-depth tie-in (plan depth → loop budgets/target_evidence/citation_bfs_enabled/cp3_enabled) | backend/ML | S | T2.3, T4.1 | ✅ `config.MAX_ITER_{SHALLOW,NORMAL,DEEP}` → `depth_budget(depth)` |
 
 ### Phase 5 — QA / validation
 | ID | Task | Lens | Effort | Deps |
@@ -194,4 +194,4 @@ Not in current scope. Build only after Story 6 acceptance gates pass.
 
 ---
 
-**Next step**: `/sc:implement` to execute. Recommended first target: **T0.1 (schemas)** then **T1.1+T1.2 (MCP dedup/eTLD+1)** — the critical path head.
+**Status**: Phases 0–4 complete (Stories 1–5 done, 203 orchestrator + 43 MCP tests green). **Next step**: fix two live-path issues (crawl4ai MCP stdout→stderr; agent JSON reliability under tool timeouts), then run **T5.3 E2E acceptance (AC1–AC7)** + **T5.4 OOM/resource validation**. G2 VRAM probe still owed by user (pull `qwen2.5:14b`).

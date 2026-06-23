@@ -52,26 +52,32 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 
 ## Architecture
 
-**Goal**: one query → vetted markdown research report. Google ADK + A2A protocol orchestrates 6 specialized agents. All inference is local via Ollama.
+**Goal**: one query → vetted markdown research report. **Google ADK 2.x + A2A protocol** orchestrates 6 specialized agents. All inference is local via Ollama.
+
+> **Design version:** the committed target is **v2** ([memory-bank/architecture.md], ratified 2026-06-23): ADK 2.x dynamic workflows, **ADK-owned sessions/resume**, a single **local-first A2A boundary**, served via `adk api_server`. Code today (Stories 1–5) still implements the **v1 hand-rolled orchestrator**; v1→v2 migration is architecture.md §15. The contracts, agents, policy, and MCP layer are unchanged between v1 and v2 — only the orchestration shell + session ownership change.
 
 **Data flow**: `Clarifier → Planner → [Acquirer → CP3? → Extractor → Verifier] loop → Writer`
 
 **Agent contracts** — agents hand off typed Pydantic artifacts, never raw text:
-- `ResearchPlan` (Planner → Orchestrator)
-- `ScoredURL[]` (Acquirer → Extractor) — will include `publication_date` + `citation_refs` after T0.4
+- `ResearchPlan` (Planner → workflow)
+- `ScoredURL[]` (Acquirer → Extractor) — includes `publication_date` + `citation_refs`
 - `ClaimLedger` (Verifier → Writer) — contains `Claim` records with `temporal_status`, `confidence_score`, `conflict_type`
-- `StageState` — lightweight pointer to resume interrupted runs (`data/sessions/{id}/stage.json`)
+- In v2 a node is invoked via `await ctx.run_node(agent, input)`, which returns the output directly — no throwaway `Runner`/session per call.
 
-**Model strategy**: one hot Qwen2.5-14B-Instruct Q4_K_M role-prompted per agent + resident `nomic-embed-text`. ~12.5 GB VRAM total. 16 GB RAM is the binding constraint — stages are strictly sequential to prevent OOM.
+**Orchestration (v2)**: an ADK **dynamic workflow** (`@node` / `Workflow` / `ctx.run_node`) is the control flow; deterministic Python (`stop_rule`, `depth_budget`, Verifier/Writer policy) decides control + policy, LLMs decide content. Replaces the v1 `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` bridge.
 
-**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`. Only Acquirer and Extractor hold MCP write tools. MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents handoff page IDs, not text.
+**Model strategy**: one hot Qwen2.5-14B role-prompted per agent + resident `nomic-embed-text:latest`. ~12.5 GB VRAM total. 16 GB RAM is the binding constraint — stages are strictly sequential to prevent OOM. This is also *why* the six stay **local sub-agents/nodes, not A2A peers** (A2A overhead buys no concurrency on one hot model). Set the **`OLLAMA_API_BASE` env var** at startup (LiteLLM routes non-generation calls through it).
 
-**Checkpoints** (human-in-loop, blocking):
+**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`, built **once per run and reused** across loop passes (then `close()`d) — not rebuilt per phase. Only Acquirer/Extractor/Verifier hold MCP tools (least-privilege). MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents handoff page IDs, not text. **MCP stays the tool boundary; it is not migrated to A2A.**
+
+**A2A boundary (v2, local-first)**: the whole pipeline is exposed as one `A2AServer` via `to_a2a(root_agent, port=8001)` or `adk api_server --a2a`, binding **localhost**. Consumed locally either by direct HTTP (`POST /run_sse`) or by another ADK agent via `RemoteA2aAgent(agent_card=…/.well-known/agent-card.json)`. Dep: `google-adk[a2a]`.
+
+**Checkpoints** (human-in-loop, blocking — v2 via ADK `RequestInput`, resumable over api_server/SSE):
 - CP1: after Planner, user approves/edits `ResearchPlan`
 - CP2: after Writer, user approves/edits draft
 - CP3: after Acquirer, before Extractor — only fires when `plan.depth == "deep"`
 
-**Stage machine** (in `Stage` enum, orchestrator manages transitions):
+**Stages** (shared vocabulary + resume/observability anchors; in v2 they are positions in the workflow graph, not a hand-walked enum):
 `INTAKE → CLARIFY → PLAN → [ACQUIRE → MID_ACQUIRE(CP3) → EXTRACT → VERIFY] → SYNTHESIZE → WRITE → DONE`
 
 ## Key Patterns
@@ -80,7 +86,7 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 
 **Config** is a singleton dataclass (`config = Config()` at module bottom). New settings go there as `field(default_factory=lambda: _env(...))` — never hardcoded in agent logic.
 
-**Session artifacts** live in `data/sessions/{id}/` as JSON files. `SessionStore` is pure I/O — no logic. On resume, the orchestrator reads `stage.json` and skips completed stages.
+**Session artifacts** live in `data/sessions/{id}/` as JSON files. **v1 (current):** `SessionStore` is the source of truth + resume engine (orchestrator reads `stage.json`, skips completed stages). **v2 (target):** ADK's session + event store owns state and resume (`App(resumability_config=ResumabilityConfig(is_resumable=True))`, resume by `invocation_id`); `data/sessions/*.json` is demoted to a **write-through export** (via an after-node callback/plugin) for inspection/diffing — `stage.json`-based resume is retired (architecture.md §5).
 
 **Independence test** (Verifier): two sources are independent iff different `etld1` AND content cosine < `INDEPENDENCE_COSINE_THRESHOLD` (default 0.92). This threshold needs tuning against a labelled mirror set.
 

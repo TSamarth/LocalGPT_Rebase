@@ -3,6 +3,7 @@
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+**Use RTK:** Always use rtk for all git commands.
 
 ## 1. Think Before Coding
 

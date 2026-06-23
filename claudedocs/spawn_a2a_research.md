@@ -74,12 +74,14 @@ Goal: orchestrator + 6 specialists. Verifier is long pole.
 
 ---
 
-## STORY 5 — Integration & Research Loop  `[sequential chain]`
-| Task | Maps to | Delegate | Strategy |
+## STORY 5 — Integration & Research Loop  `[DONE ✅ — 2026-06-23]`
+| Task | Maps to | Delegate | Status / file |
 |------|------|----------|----------|
-| 5.1 Research loop (Acquire→Extract→Verify, stop-rule, budget caps) | T4.1 | `/sc:implement` | seq, after S3 core |
-| 5.2 Full pipeline integration (all stages) | T4.2 | `/sc:implement` | seq, after 5.1, S4 |
-| 5.3 Adaptive-depth tie-in (plan depth → loop budgets) | T4.3 | `/sc:implement` | seq, after 5.2 |
+| 5.1 Research loop (Acquire→Extract→Verify, stop-rule, budget caps) | T4.1 | `/sc:implement` | ✅ `app/pipeline.py` `_run_research` + `stage_machine.stop_rule`/`depth_budget` |
+| 5.2 Full pipeline integration (all stages) | T4.2 | `/sc:implement` | ✅ `app/pipeline.py` `build_orchestrator()`/`run_pipeline()`; wires 6 agents + CP1/CP2/CP3; `main.py` rewired |
+| 5.3 Adaptive-depth tie-in (plan depth → loop budgets) | T4.3 | `/sc:implement` | ✅ `config.MAX_ITER_{SHALLOW,NORMAL,DEEP}` → `depth_budget(depth)` |
+
+**Gate G6-pre cleared**: 203 orchestrator tests green (+22: stop-rule/research-loop/pipeline/jsonio). `mcp` dep added. `app/jsonio.py` `loads_first_json` wired into acquirer/verifier. Live smoke: chain proven through MCP discover/triage/parse. Two follow-ups remain (see activeContext Known Issues): (1) crawl4ai MCP stdout→stderr, (2) agent JSON reliability under tool timeouts.
 
 ---
 
@@ -112,13 +114,13 @@ No gates defined yet — scope and design TBD when MVP is stable.
 WAVE 1  ║ [S1 + S1.5 DONE ✅] │ [S2.1 S2.3 S2.4 S2.5 S2.6 DONE ✅]        (G1/G3 cleared)
 WAVE 2  ║ [S2.2 dedup │ S3.2 S3.3 S3.5 S3.7 DONE ✅]                       (agents fanned out)
 WAVE 3  ║ [S3.1 orchestrator │ S3.6 Verifier │ S4.1 CLI DONE ✅]          (G4/G5 cleared)
-WAVE 4  ║ [S4.2 S4.3(CP3) DONE ✅] → S5.1 → S5.2 → S5.3  (head now)        (sequential integration)
-WAVE 5  ║ S6.1 S6.2 (parallel) → S6.3                                    (validation)
+WAVE 4  ║ [S4.2 S4.3(CP3) S5.1 S5.2 S5.3 DONE ✅]                          (integration complete)
+WAVE 5  ║ S6.1 S6.2 (parallel) → S6.3  (head now)                         (validation)
 WAVE 6  ║ S7.1 S7.2                                                       (post-MVP, deferred)
 ```
 
-**Critical path:** ~~S1.5~~ ✅ → ~~S2.1~~ ✅ → ~~S2.2~~ ✅ → ~~S3.6~~ ✅ → **S5.1** (head now) → S5.2 → S6.1.
-Stories 1–4 done (G1/G3/G4/G5 cleared, schemas frozen). Remaining critical path is the sequential integration chain: research loop (S5.1) → full integration incl. live checkpoint registration (S5.2) → E2E acceptance (S6.1). G2 (VRAM probe) still owed by user.
+**Critical path:** ~~S1.5~~ ✅ → ~~S2.1~~ ✅ → ~~S2.2~~ ✅ → ~~S3.6~~ ✅ → ~~S5.1~~ ✅ → ~~S5.2~~ ✅ → **S6.1** (head now).
+Stories 1–5 done (G1/G3/G4/G5 cleared, schemas frozen, 203 orchestrator + 43 MCP tests green). Remaining: fix two live-path issues (crawl4ai MCP stdout, agent JSON reliability under timeouts), then run E2E acceptance (S6.1) + OOM validation (S6.2). G2 (VRAM probe) still owed by user.
 
 ---
 
@@ -132,4 +134,4 @@ Stories 1–4 done (G1/G3/G4/G5 cleared, schemas frozen). Remaining critical pat
 
 ---
 
-**Next step**: Stories 1–4 ✅ done (G1/G3/G4/G5 cleared, orchestrator 181 + MCP 43 tests green, pushed origin/dev). Start `/sc:implement` on **S5.1 (research loop)** — head of the remaining critical path: wire Acquire→[CP3]→Extract→Verify inside `Stage.RESEARCH` with stop-rule + budget caps, then S5.2 (full integration, incl. registering the Story-4 checkpoint handlers into the composition root). User still owes S1.3 probe (G2, VRAM).
+**Next step**: Stories 1–5 ✅ done (G1/G3/G4/G5 cleared, 203 orchestrator + 43 MCP tests green, pushed origin/dev). Fix two live-path issues (crawl4ai MCP stdout→stderr banner; agent JSON reliability under tool timeouts), then run **S6.1 E2E acceptance (AC1–AC7)** + **S6.2 OOM/resource validation**. User still owes S1.3 probe (G2, VRAM) and should pull `qwen2.5:14b` (smoke used `qwen2.5:14b`).
