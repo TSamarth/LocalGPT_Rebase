@@ -365,3 +365,29 @@ async def test_verify_passes_payload_to_runner():
 
     await verify("  the verifier payload  ", runner=_capturing)
     assert captured["payload"] == "  the verifier payload  "
+
+
+# ── verify() resilience under tool timeouts (E0.S2) ───────────────────────────
+async def test_verify_retries_then_parses_after_prose_first_response():
+    """First call returns timeout prose (no JSON); the JSON-only re-ask recovers."""
+    calls: list[str] = []
+
+    async def _flaky(payload: str):
+        calls.append(payload)
+        if len(calls) == 1:
+            return "A crawl tool timed out, so I could not retrieve the chunks."
+        return _ledger_json()
+
+    led = await verify("payload", runner=_flaky)
+    assert len(calls) == 2  # one prose response, one successful re-ask
+    assert led.claims[0].status == ClaimStatus.KEPT
+
+
+async def test_verify_degrades_to_empty_ledger_when_no_json():
+    """Both attempts return pure prose → empty ledger, no crash."""
+    async def _always_prose(_payload: str):
+        return "All tools timed out; no answer available."
+
+    led = await verify("payload", runner=_always_prose)
+    assert isinstance(led, ClaimLedger)
+    assert led.claims == []

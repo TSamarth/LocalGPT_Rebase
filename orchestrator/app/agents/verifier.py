@@ -33,12 +33,14 @@ The optional toolset is injectable and lazily imported, exactly like the Extract
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple, Union
 
 from google.adk.agents import LlmAgent
 from google.adk.tools.base_toolset import BaseToolset
 
 from ..config import config
+from ..jsonio import invoke_json_with_retry, loads_first_json
 from ..llm import build_agent
 from ..schemas import (
     ClaimLedger,
@@ -426,11 +428,38 @@ def parse_ledger(raw: Union[str, dict, ClaimLedger]) -> ClaimLedger:
     if isinstance(raw, ClaimLedger):
         return raw
     if isinstance(raw, str):
-        return ClaimLedger.model_validate_json(raw)
+        return ClaimLedger.model_validate(loads_first_json(raw))
     return ClaimLedger.model_validate(raw)
 
 
 # ── Agent factory ─────────────────────────────────────────────────────────────
+def _build_default_toolset() -> BaseToolset:
+    """Construct the real crawl4ai ``MCPToolset`` (stdio subprocess), READ tool only.
+
+    Imported lazily because ``mcp`` is an optional ADK extra: keeping the import
+    out of module scope lets the orchestrator (and the offline unit tests) load
+    this module — and inject a fake toolset — without ``mcp`` installed.
+
+    ``tool_filter`` restricts the agent to ``search_chunks`` so the live Verifier
+    can retrieve crawled chunks itself, per subtopic, without holding any write
+    tool (least-privilege, architecture.md §1/§2).
+    """
+    from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
+    from mcp import StdioServerParameters
+
+    server_cwd = str(Path(config.MCP_SERVER_CWD).resolve())
+    return MCPToolset(
+        connection_params=StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command="uv",
+                args=["run", "python", "main.py"],
+                cwd=server_cwd,
+            ),
+        ),
+        tool_filter=[SEARCH_TOOL_NAME],
+    )
+
+
 def build_verifier(
     *,
     toolset: Optional[BaseToolset] = None,
@@ -530,8 +559,14 @@ async def verify(
     the caller feed real cosine/methodology evidence; they default to neutral values.
     """
     invoke = runner or _default_runner
-    raw = await invoke(payload)
-    parsed = parse_ledger(raw)
+    raw = await invoke_json_with_retry(invoke, payload)
+    try:
+        parsed = parse_ledger(raw)
+    except ValueError:
+        # No parseable JSON even after the JSON-only re-ask (e.g. search/crawl tools
+        # timed out and the model answered in prose). Degrade to an empty ledger so
+        # the run survives rather than crashing the trust core (E0.S2).
+        parsed = ClaimLedger(claims=[])
     return enrich_ledger(
         parsed,
         cosine_lookup=cosine_lookup,

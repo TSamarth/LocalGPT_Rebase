@@ -40,6 +40,7 @@ from google.adk.tools.base_toolset import BaseToolset
 
 from ..citation import CitationClient, RelevanceScorer, extract_paper_id
 from ..config import config
+from ..jsonio import invoke_json_with_retry, loads_first_json
 from ..llm import build_agent
 from ..schemas import CrawlStrategy, Depth, ResearchPlan, ScoredURL, SourceClass, Subtopic
 
@@ -123,7 +124,7 @@ def parse_scored_urls(raw: Union[str, list, dict, ScoredURL]) -> list[ScoredURL]
     back whatever the runner produced. Returns validated ``ScoredURL`` records.
     """
     if isinstance(raw, str):
-        raw = json.loads(raw)
+        raw = loads_first_json(raw)
     if isinstance(raw, ScoredURL):
         return [raw]
     if isinstance(raw, dict):
@@ -325,8 +326,14 @@ async def acquire(
     ``scorer`` is the optional LLM relevance gate threaded into the BFS (§11).
     """
     invoke = runner or _default_runner
-    raw = await invoke(subtopic.question)
-    scored_urls = parse_scored_urls(raw)
+    raw = await invoke_json_with_retry(invoke, subtopic.question)
+    try:
+        scored_urls = parse_scored_urls(raw)
+    except ValueError:
+        # The model returned no parseable JSON even after the JSON-only re-ask
+        # (e.g. crawl tools timed out and it answered in prose). Degrade to "no
+        # candidates" so the run survives rather than crashing the pipeline (E0.S2).
+        scored_urls = []
 
     if not should_run_citation_bfs(subtopic.source_classes, plan.depth):
         return scored_urls

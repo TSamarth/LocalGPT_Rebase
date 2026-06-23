@@ -390,3 +390,36 @@ async def test_acquire_runner_returning_list_is_parsed():
     )
     assert result[0].url == "https://a.com"
     assert result[0].strategy == CrawlStrategy.SKIP
+
+
+# ── acquire: resilience under tool timeouts (E0.S2) ───────────────────────────
+async def test_acquire_retries_then_parses_after_prose_first_response():
+    """First call returns timeout prose (no JSON); the JSON-only re-ask recovers."""
+    calls: list[str] = []
+
+    async def runner(question: str):
+        calls.append(question)
+        if len(calls) == 1:
+            return "The discovery tool timed out, so I have no URLs to return."
+        return _canned_triage_json()
+
+    result = await acquire(
+        _subtopic([SourceClass.WEB]),
+        _plan(Depth.NORMAL),
+        runner=runner,
+    )
+    assert len(calls) == 2  # one prose response, one successful re-ask
+    assert result[0].url == "https://arxiv.org/abs/2301.00001"
+
+
+async def test_acquire_degrades_to_empty_when_no_json():
+    """Both attempts return pure prose → empty list, no crash."""
+    async def runner(_question: str):
+        return "All crawl tools timed out; nothing to triage."
+
+    result = await acquire(
+        _subtopic([SourceClass.WEB]),
+        _plan(Depth.NORMAL),
+        runner=runner,
+    )
+    assert result == []
