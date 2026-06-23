@@ -1,7 +1,18 @@
 # Active Context
 
-## Current Phase
-**Story 2 (MCP extensions) + Story 3 (all six agents) + Story 4 (checkpoints) — DONE + tested.** Story 2/3 built via parallel git-worktree build (Wave 0 foundation → Wave A 6 tracks → Wave B Acquirer/Verifier, merged to `dev`). Story 4 (CP1/CP2/CP3) built inline 2026-06-22. orchestrator **181** tests green, MCP **43** green, ruff clean, pushed to origin/dev. **Next: Story 5** — research loop wiring (Acquire→Extract→Verify, stop-rule) + live checkpoint registration into the composition root.
+## Current Phase — v1→v2 MIGRATION IN PROGRESS (2026-06-23): E0 + E1 (P0) landed
+The §15 migration is executing. Plans: [../claudedocs/workflow_v1_to_v2_migration.md] (phases P0–P7) + [../claudedocs/spawn_v1_to_v2_migration.md] (epics E0–E5). **Kickoff slice done: E1 (P0 Tier-0) + E0 (live-path hardening), run in parallel.**
+- **E1 / P0 ✅** — pin `google-adk[a2a]>=2.3,<3` (lock=2.3.0, +`a2a-sdk` 0.3.26); `OLLAMA_API_BASE` env set in `build_model()`; `MCPToolset.close()` per drive call in `pipeline.py` (leak fix). *Note:* "toolset once-per-run" is infeasible in v1's `asyncio.run`-per-handler bridge → deferred to E2.S2.T4 (node path).
+- **E0 ✅** — crawl4ai stdout→stderr (fd-level guard `dup2(2,1)` in `mcp/Crawl4AI_MCP/main.py`); agent JSON robustness (`jsonio.invoke_json_with_retry` + degrade-to-empty). E0.S3 (real-HW probe) ⏳ pending user.
+- **Suite: 216 orchestrator + 43 MCP green, ruff clean.** Working tree only — not committed.
+- **Next = E2.S1 / P1**: `App` + one-node `Workflow` (`app/workflow.py`+`app/adk_app.py`), Clarifier→Planner→CP1 `RequestInput`, `ResumabilityConfig`, resume-by-`invocation_id` validation (hard stop-and-verify gate). E2–E5 still pending.
+
+**Design baseline (v2, ratified 2026-06-23):** **ADK 2.x**, **dynamic-workflow** orchestration (`@node`/`Workflow`/`ctx.run_node`), **ADK-owned sessions/resume** (`ResumabilityConfig`; `data/sessions/*.json` → write-through export), `RequestInput` HITL, **single local-first A2A boundary** (`to_a2a` / `adk api_server --a2a`, localhost) with the 6 specialists kept as local nodes (not A2A peers). Master spec: [architecture.md] (§0/§13/§14/§15). User decisions: ADK 2.x ✓, ADK-owned sessions ✓, A2A local-first ✓, deploy = `adk api_server` ✓.
+
+## Prior Phase (v1 build — complete)
+**Story 5 (Integration & Research Loop) — DONE + offline-tested; live path validated to the agent-output boundary.** Built 2026-06-23: T4.1 per-subtopic research loop + stop-rule, T4.2 composition root (`app/pipeline.py`) wiring all six real agents + CP1/CP2/CP3, T4.3 adaptive depth→iteration budgets. orchestrator **203** tests green (was 181: +stop-rule/research-loop/pipeline/jsonio), MCP **43** green, ruff clean. Earlier: Story 2/3/4 done.
+
+**Live smoke (user bar = live run):** reached RESEARCH and exercised the real chain — Ollama Clarifier→Planner, MCP subprocess launch, `discover_urls` (28 real URLs), triage scoring, fenced-JSON parsing. Did NOT reach a final report; blocked by two issues *outside* Story-5 wiring (see Known Issues). Composition-root integration itself proven correct.
 
 ## Current Focus
 Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ollama), deterministic stage machine + orchestrator skeleton (INTAKE→DONE, deep-only CP3 via `ResearchPhase.MID_ACQUIRE`), all six agents (Clarifier/Planner/Acquirer/Extractor/Verifier/Writer), Semantic Scholar citation client (`app/citation.py`), Story 2 MCP extensions (eTLD+1, dedup, seed ingest, PDF routing, rate-limit backoff), and Story 4 checkpoints (`app/checkpoint.py`: `cp1/cp2/cp3_checkpoint` + `Handler` wrappers; `post_handlers`/`phase_handlers` hooks in the orchestrator; `SessionStore.save/load_scored_urls` for CP3's edited source list). All tests run offline (mocked/stubbed model, monkeypatched stdin/editor). **Story 4 nuance**: the checkpoint *mechanism* + handlers landed and are G5-verified by tests that register them directly; registration into the live composition root happens with Story 5 integration (alongside real agent wiring — skeleton still uses stub handlers).
@@ -22,12 +33,18 @@ Pipeline now has: shared one-hot model factory (`app/llm.py`, ADK `LiteLlm`→Ol
 - **Tool access**: only Acquirer/Extractor hold MCP write tools (least privilege).
 - Open questions Q1–Q6 all resolved in [architecture.md] (model fit, independent-source = eTLD+1 + cosine<0.92, MCP 5 extensions, resume via stage.json, stop-rule, CLI checkpoints).
 
-## Next Steps (Story 5 + integration)
-1. **T4.1 Research loop** — wire Acquire→[CP3]→Extract→Verify inside `Stage.RESEARCH` with the stop-rule (target_evidence + diminishing returns + iteration cap) and budget caps. Replace `_run_research_pass`'s phase-walk stub with real agent calls.
-2. **T4.2 Full pipeline integration** — composition root that registers real agents as stage handlers AND registers the checkpoint handlers (`cp1_handler`→`post_handlers[PLAN]`, `cp2_handler`→`post_handlers[WRITE]`, `cp3_handler`→`phase_handlers[MID_ACQUIRE]`). This is where Story 4's mechanism goes live.
-3. **T4.3 Adaptive-depth tie-in** — plan depth → loop budgets / target_evidence / cp3_enabled.
-4. **Add `mcp` ADK extra** to `orchestrator/pyproject.toml` before the live MCP/Extractor path (currently lazy-imported so offline tests pass).
-5. **Run setup probe on real hardware**: `cd orchestrator && python scripts/check_setup.py` — pull Qwen2.5-14B-Q4 (or 8B fallback) + nomic-embed-text; confirm VRAM < 14 GB (Gate G2).
+## Story 5 — DONE (2026-06-23)
+- **T4.1 Research loop** — `Orchestrator._run_research` (per-subtopic, budget-bounded) + `stage_machine.stop_rule`/`depth_budget`; ledger accumulates across passes; phase handlers ACQUIRE/EXTRACT/VERIFY.
+- **T4.2 Composition root** — `app/pipeline.py` `build_orchestrator()`/`run_pipeline()`: wires six agents, CP1→`post_handlers[PLAN]`, CP2→`post_handlers[WRITE]`, CP3→`phase_handlers[MID_ACQUIRE]`; sync↔async bridge (`_run_sync`); `CheckpointRejected` abort + report publish. `main.py` rewired.
+- **T4.3 Adaptive depth** — `config.MAX_ITER_{SHALLOW,NORMAL,DEEP}` → `depth_budget(depth)` consumed by stop-rule. target_evidence/CP3/citation-BFS already depth-gated.
+- **Dep fix**: added `mcp` to `orchestrator/pyproject.toml` (ADK `MCPToolset` requires the `mcp` SDK; was undeclared, masked by lazy import + offline fakes).
+- **Robustness**: `app/jsonio.py loads_first_json` (tolerates code fences + trailing prose) wired into `acquirer.parse_scored_urls` + `verifier.parse_ledger`.
+- **Verifier**: added `_build_default_toolset()` (filter `search_chunks`) for live chunk retrieval.
+
+## Known Issues / Follow-ups (live path — NOT Story-5 wiring)
+1. ✅ **RESOLVED (E0.S1, 2026-06-23)** — crawl4ai MCP stdout pollution (`[INIT]... Crawl4AI` banner corrupting stdio JSON-RPC). Fixed by an fd-level guard in `mcp/Crawl4AI_MCP/main.py`: `dup2(2,1)` repoints fd-1 to stderr + `sys.stdout` rebound over the saved real-stdout fd so MCP keeps a clean JSON-RPC channel. MCP 43 green.
+2. ✅ **RESOLVED (E0.S2, 2026-06-23)** — agent JSON reliability under tool timeouts (Acquirer/Verifier returning non-JSON prose → `loads_first_json` raises). Fixed by `jsonio.invoke_json_with_retry` (one JSON-only re-ask) + graceful degrade (`acquire→[]`, `verify→empty ledger`); genuine Pydantic `ValidationError` still surfaces.
+3. ⏳ **PENDING USER (E0.S3)** — run setup probe on real hardware: `cd orchestrator && python scripts/check_setup.py` — pull `qwen2.5:14b-instruct-q4_K_M` + embed; confirm VRAM < 14 GB (Gate G2).
 
 ## Active Considerations
 - 16 GB RAM binding constraint, not VRAM → sequential execution structural.

@@ -1,6 +1,8 @@
 # Progress
 
-## Status: Story 2 (MCP extensions) + Story 3 (ALL six agents) + Story 4 (checkpoints CP1/CP2/CP3) done. Wave B (Acquirer 3.4 + Verifier 3.6) landed 2026-06-22; Story 4 landed same day. orchestrator 181 tests green, MCP 43 tests green, ruff clean, pushed origin/dev. Story 4 complete → Story 5 (research loop + live checkpoint registration) next.
+## Status: Stories 1–5 done; **v1→v2 migration kickoff landed 2026-06-23 — E1 (P0 Tier-0) + E0 (live-path hardening), in parallel.** E1: pin `google-adk[a2a]>=2.3,<3` (lock 2.3.0 +`a2a-sdk` 0.3.26), `OLLAMA_API_BASE` env in `build_model()`, `MCPToolset.close()` per drive call. E0: crawl4ai stdout→stderr fd-guard (`mcp/Crawl4AI_MCP/main.py`), `jsonio.invoke_json_with_retry`+degrade. **216 orchestrator + 43 MCP green, ruff clean** (working tree, uncommitted). Both Story-5 live blockers now cleared; E0.S3 real-HW probe ⏳ user. Next = E2.S1/P1 (App+one-node Workflow+CP1+resume gate). See [../claudedocs/spawn_v1_to_v2_migration.md] Execution Log.
+
+## Story 5 (Integration & Research Loop) landed 2026-06-23 — — T4.1 per-subtopic loop + stop-rule, T4.2 composition root (`app/pipeline.py`) wiring 6 agents + CP1/CP2/CP3, T4.3 depth→iteration budgets. orchestrator **203** tests green (181→+22: stop-rule/research-loop/pipeline/jsonio), MCP 43 green, ruff clean. Added `mcp` dep; hardened JSON parsing (`app/jsonio.py`); verifier `search_chunks` toolset. Live smoke proved the chain through MCP discover/triage/parse but didn't finish — blocked by (1) crawl4ai MCP stdout banner corrupting JSON-RPC and (2) tool-timeout→non-JSON agent output (both outside Story-5 wiring; logged as follow-ups in activeContext.md). **Next: agent JSON-robustness + MCP stdout→stderr, then full live run.**
 
 ## What Works (exists today)
 - crawl4ai MCP server at `mcp/Crawl4AI_MCP/`: full pipeline — discover_urls (SerpAPI+DDG+arXiv+SemanticScholar+GoogleSERP), score_and_triage_urls, crawl_url/many/deep/adaptive, search_chunks, get_crawl_stats. SQLite + ChromaDB + Ollama embeddings. ADK MCPToolset integration designed.
@@ -79,8 +81,17 @@
   - [x] CP1 + CP2 hooks (`post_handlers` on PLAN/WRITE) — `orchestrator.py`
   - [x] CP3 mid-acquisition checkpoint (deep plans only, `phase_handlers` on MID_ACQUIRE) + `SessionStore.save/load_scored_urls`
   - [ ] Live registration of checkpoint handlers into composition root — deferred to Story 5 (T4.2)
-- [ ] **Story 5** — Research loop + integration + adaptive depth (incl. live checkpoint registration)
-- [ ] **Story 6** — E2E acceptance (AC1–AC7) + OOM validation
+- [x] **Story 5** — Research loop + integration + adaptive depth (incl. live checkpoint registration) — DONE 2026-06-23 (203 orchestrator tests green)
+- [ ] **Story 5.5 — v2 ADK 2.x re-alignment (DESIGN ratified 2026-06-23; impl in progress)** — migrate v1 hand-rolled orchestration → ADK 2.x per [architecture.md] §15. Plans: [../claudedocs/workflow_v1_to_v2_migration.md] (P0–P7) + [../claudedocs/spawn_v1_to_v2_migration.md] (E0–E5):
+  - [x] **Tier 0 correctness (E1/P0, 2026-06-23)**: `OLLAMA_API_BASE` env in `build_model()`; pinned `google-adk[a2a]>=2.3,<3` (lock 2.3.0); `MCPToolset.close()` per drive call. *(once-per-run toolset deferred to node path / E2.S2.T4 — infeasible in v1 sync-bridge.)*
+  - [x] **Live-path hardening (E0, 2026-06-23, parallel side-track)**: crawl4ai stdout→stderr fd-guard; agent JSON retry+degrade. *(Not in §15; cleared the two Story-5 live blockers so P7 E2E can pass.)*
+  - [ ] `App` + one-node `Workflow` (Clarifier→Planner→CP1) with `ResumabilityConfig`; validate ADK-owned resume
+  - [ ] Port research loop (`stop_rule`) + Acquirer/Extractor/Verifier as `ctx.run_node` nodes
+  - [ ] Replace CP1/CP2/CP3 with `RequestInput` (+ CP3 input adapter); retire console `checkpoint.py`
+  - [ ] Flip session ownership to ADK; demote `SessionStore` → export callback/plugin; retire `stage.json` resume
+  - [ ] Expose pipeline as local-first A2A (`to_a2a`/`adk api_server --a2a`) + agent card; wire CLI to `/run_sse`
+  - [ ] Retire `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync`
+- [ ] **Story 6** — E2E acceptance (AC1–AC7) + OOM validation + resume-by-`invocation_id` + localhost A2A round-trip
 - [ ] **Story 7** (post-MVP) — Knowledge graph extraction + session comparison
 
 ## Known Issues / Risks
@@ -91,6 +102,8 @@
 - **Carry-forward (Wave B / integration)**: the `mcp` ADK extra is NOT in `orchestrator/pyproject.toml`. Extractor (T3.5) lazy-imports `MCPToolset` so offline tests pass, but the live MCP/Extractor path needs that extra added before E2E.
 
 ## Decision Log
+- 2026-06-23: **Migration kickoff — E1 (P0) + E0 executed in parallel.** Ran the spawn-doc recommended first slice: E1 (Tier-0 correctness, main thread) + E0 (live-path hardening, background agent) on one working tree, disjoint files. **E1.T3 scope correction:** the §15/spawn "MCPToolset once across N passes" is infeasible in v1 — `pipeline._run_sync` runs each handler under its own `asyncio.run`, so a stdio toolset (bound to one loop+subprocess) can't span passes; shipped the achievable fix (close-per-drive-call, kills the leak) and moved the single-long-lived-toolset pattern to E2.S2.T4 (node path, one loop). E1.T2 touched only `llm.py` (config.py unneeded). a2a-sdk 0.3.26 pulled by the `[a2a]` extra. 203→**216 orchestrator** tests (+5 E1, +13 E0), MCP 43 green, ruff clean. Uncommitted. Next = E2.S1/P1.
+- 2026-06-23: **v2 design pivot ratified.** ADK-docs alignment review ([../claudedocs/adk_alignment_review.md]) found the repo runs ADK 2.3.0 but codes like 1.x. Committed to: **ADK 2.x** (pin `>=2.3,<3`); **dynamic-workflow** orchestration; **ADK-owned sessions/resume** (`data/sessions/*.json` → export); **`RequestInput` HITL**; **single local-first A2A boundary** (`to_a2a`/`adk api_server --a2a`, localhost) with the 6 specialists as local nodes (ADK guidance: don't A2A in-process shared-model agents). Deploy = `adk api_server`. [architecture.md] rewritten to v2 (§0/§13/§14/§15); CONTEXT/systemPatterns/techContext synced. Open Q answers: ADK 2.x ✓, ADK sessions ✓, A2A pipeline-edge local-first ✓, api_server ✓. Migration = §15 (next: `/sc:workflow`).
 - 2026-06-18: Brainstorm complete. Framework left open. Verification = corroborate-or-flag. Checkpoints at plan + draft. Adaptive depth.
 - 2026-06-19: Design — ADK+A2A, hierarchical coordinator, one hot 14B model. Workflow + task hierarchy produced.
 - 2026-06-19: Story 1 implemented. Schemas use Pydantic v2 (ADK-native). New package at `orchestrator/` (sibling to `mcp/`). 14 tests green.
