@@ -13,6 +13,7 @@ running Ollama.
 """
 from __future__ import annotations
 
+import os
 from typing import Optional, Sequence
 
 from google.adk.agents import LlmAgent
@@ -34,6 +35,11 @@ def build_model(model_name: Optional[str] = None) -> LiteLlm:
     lets LiteLLM silently drop any param a provider doesn't accept, so the same
     factory stays robust across model swaps.
     """
+    # LiteLLM routes some Ollama calls (token counting, embeddings) through the
+    # OLLAMA_API_BASE env var rather than the per-request ``api_base=``; mirror the
+    # configured base URL into it so those paths reach the same local server
+    # (architecture.md §15 Tier-0).
+    os.environ["OLLAMA_API_BASE"] = config.OLLAMA_BASE_URL
     return LiteLlm(
         model=ollama_model_str(model_name or config.REASONING_MODEL),
         api_base=config.OLLAMA_BASE_URL,

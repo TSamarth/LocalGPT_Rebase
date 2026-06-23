@@ -212,10 +212,23 @@ async def _drive_extractor(urls: list[ScoredURL], toolset) -> None:
 
     The agent maps each URL's ``strategy`` onto the matching crawl tool; we only
     need it to run, so the returned page IDs are discarded (downstream retrieval is
-    by the Verifier's ``search_chunks``)."""
-    agent = extractor.build_extractor(toolset)
-    payload = json.dumps([u.model_dump(mode="json") for u in urls])
-    await _drive(agent, "extractor", payload, "extracted_page_ids")
+    by the Verifier's ``search_chunks``).
+
+    Toolset lifecycle (Tier-0): when no toolset is injected we build the default
+    crawl4ai ``MCPToolset`` here and ``close()`` it before returning, so each drive
+    call cleans up its stdio subprocess instead of leaking one (the v1 sync bridge
+    runs every handler under its own ``asyncio.run``, so a toolset cannot outlive a
+    single drive call — a single long-lived toolset arrives with the v2 node path).
+    An *injected* toolset is owned by the caller and is left open."""
+    owns_toolset = toolset is None
+    active = toolset if toolset is not None else extractor._build_default_toolset()
+    try:
+        agent = extractor.build_extractor(active)
+        payload = json.dumps([u.model_dump(mode="json") for u in urls])
+        await _drive(agent, "extractor", payload, "extracted_page_ids")
+    finally:
+        if owns_toolset:
+            await active.close()
 
 
 def _make_verify_handler(deps: PipelineDeps):
@@ -233,11 +246,20 @@ def _make_verify_handler(deps: PipelineDeps):
 
 
 def _make_default_verify_runner(toolset):
-    """Live Verifier runner that holds ``search_chunks`` (built lazily on first use)."""
+    """Live Verifier runner that holds ``search_chunks`` (built lazily on first use).
+
+    Toolset lifecycle (Tier-0): a default ``MCPToolset`` we build here is ``close()``d
+    after the drive call so its stdio subprocess is not leaked; an injected toolset is
+    the caller's to close. See ``_drive_extractor`` for why this is per-call in v1."""
     async def runner(payload: str) -> str:
+        owns_toolset = toolset is None
         active = toolset if toolset is not None else verifier._build_default_toolset()
-        agent = verifier.build_verifier(toolset=active)
-        return await _drive(agent, verifier.AGENT_NAME, payload, verifier.OUTPUT_KEY)
+        try:
+            agent = verifier.build_verifier(toolset=active)
+            return await _drive(agent, verifier.AGENT_NAME, payload, verifier.OUTPUT_KEY)
+        finally:
+            if owns_toolset:
+                await active.close()
     return runner
 
 
