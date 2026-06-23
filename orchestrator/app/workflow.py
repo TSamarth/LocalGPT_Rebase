@@ -27,15 +27,19 @@ calls ``ctx.run_node``) while letting each ``build_research_workflow(...)`` call
 bind its own clarifier/planner — the cleanest way to make the seam testable
 without module-level mutable state.
 
-CP1 placeholder: T1 only auto-approves (passthrough). The real
-``RequestInput(response_schema=ResearchPlan)`` checkpoint lands in T4. The seam is
-isolated in :func:`_cp1_autoapprove` so T4 can swap it cleanly.
+CP1 (T4): a real ``RequestInput`` plan-approval checkpoint. The isolated
+``_cp1_checkpoint`` node ``yield``s ``RequestInput(response_schema=ResearchPlan)``
+to pause the run for the user; on resume the human-supplied (possibly edited)
+plan becomes the node's output. T6 adds an optional ``SessionStore`` write-through
+so clarify+plan land on disk during the slice (an additive safety net, demoted in
+E3.S2 — see the note on the ``store`` seam below).
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from google.adk import Context, Workflow
+from google.adk.events import RequestInput
 from google.adk.workflow import START, node
 from google.adk.workflow._base_node import BaseNode
 
@@ -43,25 +47,59 @@ from .agents.clarifier import build_clarifier, parse_clarify_result
 from .agents.planner import build_planner, parse_plan
 from .llm import build_model
 from .schemas import ResearchPlan
+from .session import SessionStore
+
+
+def _cp1_summary(plan: ResearchPlan) -> str:
+    """Human-readable plan summary for the CP1 prompt.
+
+    Ports the ``=== Checkpoint 1: Research Plan ===`` block from
+    :func:`app.checkpoint.cp1_checkpoint` (the v1 console gate) so the same
+    information the user saw at the stdin checkpoint now rides on the
+    ``RequestInput(message=...)`` shown by the ADK HITL client. Kept as a tiny
+    pure helper so the node body stays about control flow, not formatting.
+    """
+    lines = [
+        "=== Checkpoint 1: Research Plan ===",
+        f"depth={plan.depth.value}  subtopics={len(plan.subtopics)}  "
+        f"seed_urls={len(plan.seed_urls)}",
+    ]
+    lines += [
+        f"  - [{st.id}] {st.question} (target_evidence={st.target_evidence})"
+        for st in plan.subtopics
+    ]
+    return "\n".join(lines)
 
 
 @node(rerun_on_resume=False)
-async def _cp1_autoapprove(node_input: ResearchPlan) -> ResearchPlan:
-    """Checkpoint 1 placeholder (T1 only) — auto-approve passthrough.
+async def _cp1_checkpoint(node_input: ResearchPlan):
+    """Checkpoint 1 (T4) — block for human plan approval via ``RequestInput``.
 
-    Returns the planner's ``ResearchPlan`` unchanged, standing in for the human
-    plan-approval checkpoint. T4 replaces this node with a
-    ``@node(rerun_on_resume=False)`` that ``yield``s
-    ``RequestInput(response_schema=ResearchPlan)`` so the user can edit the plan
-    before research starts. Kept isolated here so that swap is a one-node change.
+    ``node_input`` is the planner's ``ResearchPlan`` (passed by the parent as
+    ``ctx.run_node(_cp1_checkpoint, plan)``). The node ``yield``s a
+    ``RequestInput`` carrying the ported plan summary (``message``), the plan
+    itself (``payload``), and ``response_schema=ResearchPlan`` — which pauses the
+    workflow. ADK validates the human's resume response against that schema, so
+    the value the parent receives back from ``ctx.run_node`` is the approved
+    (possibly edited) plan as a dict.
+
+    ``rerun_on_resume=False``: this node does not re-execute on resume — the
+    framework treats the injected response as the node's output directly. (The
+    parent ``research`` node, which *calls* ``ctx.run_node``, is the one that
+    must be ``rerun_on_resume=True``.)
     """
-    return node_input
+    yield RequestInput(
+        message=_cp1_summary(node_input),
+        payload=node_input,
+        response_schema=ResearchPlan,
+    )
 
 
 def build_research_workflow(
     *,
     clarifier_node: Optional[BaseNode] = None,
     planner_node: Optional[BaseNode] = None,
+    store: Optional[SessionStore] = None,
 ) -> Workflow:
     """Build the research ``Workflow`` (the START→CP1 slice).
 
@@ -75,6 +113,14 @@ def build_research_workflow(
             accepts an ``LlmAgent`` directly, so no wrapping is needed.
         planner_node: node run for the plan stage. Defaults to the
             ``build_planner`` ``LlmAgent`` on the shared model.
+        store: optional :class:`~app.session.SessionStore` — when provided, the
+            ``research`` node write-throughs the clarify+plan artifacts to
+            ``data/sessions/{id}/`` during the run (T6). This is an **additive
+            safety net**, NOT an execution override: it never gates or replaces
+            ADK's own auto-checkpointed resume state, it only mirrors the plan to
+            disk so a run is inspectable/recoverable outside the ADK event log.
+            **Demoted in E3.S2** once ADK persistence is the single source of
+            truth. ``None`` (default) = no disk write, so case (a) is unchanged.
 
     Returns:
         A ``Workflow`` whose single edge runs the ``research`` node from START.
@@ -105,8 +151,18 @@ def build_research_workflow(
         # (``apply_depth_targets``), so the stop-rule targets stay config-driven.
         plan = parse_plan(await ctx.run_node(planner, clarified.normalized_query))
 
-        # ── CP1 seam (T1 placeholder; T4 swaps in RequestInput) ──────────────
-        approved = parse_plan(await ctx.run_node(_cp1_autoapprove, plan))
+        # ── T6 write-through safety net (additive; demoted in E3.S2) ─────────
+        # Mirror the planned slice to disk so the run is inspectable/recoverable
+        # outside ADK's event log. This is NOT an execution override — it only
+        # persists, it never re-reads to drive control flow.
+        if store is not None:
+            store.save_plan(plan)
+
+        # ── CP1 (T4): real RequestInput plan-approval checkpoint ─────────────
+        # ``_cp1_checkpoint`` yields RequestInput and pauses; on resume the
+        # human-supplied plan comes back as a dict — coerce it via ``parse_plan``
+        # (which also re-applies the depth policy to any edited subtopics).
+        approved = parse_plan(await ctx.run_node(_cp1_checkpoint, plan))
         return approved
 
     return Workflow(name="research", edges=[(START, research)])
