@@ -36,7 +36,7 @@ class Config:
         default_factory=lambda: _env("OLLAMA_BASE_URL", "http://localhost:11434")
     )
     OLLAMA_EMBED_MODEL: str = field(
-        default_factory=lambda: _env("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        default_factory=lambda: _env("OLLAMA_EMBED_MODEL", "nomic-embed-text:latest")
     )
     OLLAMA_LLM_MODEL: str = field(
         default_factory=lambda: _env("OLLAMA_LLM_MODEL", "llama3.2")

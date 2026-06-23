@@ -61,7 +61,10 @@ def test_cp3_skips_on_shallow_plan():
         fired: list[int] = []
         orch.phase_handlers[ResearchPhase.MID_ACQUIRE] = lambda o, f=fired: f.append(1)
         _to_research(orch)
-        orch._run_research_pass()
+        orch._run_research()
+        assert ResearchPhase.MID_ACQUIRE not in orch.phase_trace, (
+            f"MID_ACQUIRE must not fire for {depth}"
+        )
         assert fired == [], f"MID_ACQUIRE must not fire for {depth}"
 
 
@@ -71,7 +74,7 @@ def test_cp3_fires_on_deep_plan():
     fired: list[int] = []
     orch.phase_handlers[ResearchPhase.MID_ACQUIRE] = lambda o: fired.append(1)
     _to_research(orch)
-    orch._run_research_pass()
+    orch._run_research()
     assert fired == [1]
 
 
@@ -87,7 +90,7 @@ def test_cp3_handler_supplemental_reenters_acquire(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(inputs))
 
     _to_research(orch)
-    orch._run_research_pass()
+    orch._run_research()
 
     assert orch.phase_trace.count(ResearchPhase.ACQUIRE) == 2
     assert "https://new" in [u.url for u in orch.store.load_scored_urls()]

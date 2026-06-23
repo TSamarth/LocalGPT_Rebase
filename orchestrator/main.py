@@ -1,17 +1,18 @@
 """
 Entry point for the A2A deep-research orchestrator.
 
-Story 3.1 skeleton: the orchestrator walks a session through the full stage
-machine with stub handlers (real agents replace the stubs as their tracks land).
-This validates that the foundation (config + schemas + session store + stage
-machine) drives a run end-to-end and reaches DONE.
+Story 5: the orchestrator runs the full pipeline live — the composition root
+(``app.pipeline``) wires the six real agents + the CP1/CP2/CP3 human checkpoints,
+and the research loop runs Acquire→[CP3]→Extract→Verify per subtopic under the
+stop-rule. Drives a session end-to-end against Ollama + the crawl4ai MCP server
+and publishes the approved report to ``data/reports/{session_id}.md``.
 """
 from __future__ import annotations
 
 import sys
 
 from app.config import config
-from app.orchestrator import Orchestrator
+from app.pipeline import build_orchestrator, run_pipeline
 
 
 def main(argv: list[str]) -> int:
@@ -21,12 +22,12 @@ def main(argv: list[str]) -> int:
         print('usage: python main.py "your research query"')
         return 1
 
-    orch = Orchestrator.start(query)
+    orch = build_orchestrator(query)
     print(f"session created: {orch.store.session_id}")
     print(f"  stage dir: {orch.store.dir}")
     print(f"  model:     {config.REASONING_MODEL}")
-    final = orch.run_to_completion()
-    print(f"  final stage: {final.value}  (agents are stubs — Story 3 tracks)")
+    final = run_pipeline(orch)
+    print(f"  final stage: {final.value}")
     return 0
 
 

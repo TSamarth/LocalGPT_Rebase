@@ -54,6 +54,7 @@ def main() -> int:
     print(f"Ollama URL: {config.OLLAMA_BASE_URL}")
     try:
         installed = check_ollama()
+        print(f"installed: {installed}")
     except (urllib.error.URLError, OSError) as exc:
         print(f"  FAIL: Ollama not reachable ({exc}). Start it with `ollama serve`.")
         return 1
@@ -66,7 +67,7 @@ def main() -> int:
         print(f"  OK: reasoning model present ({which}).")
     else:
         ok = False
-        print(f"  MISSING reasoning model. Pull one:")
+        print("  MISSING reasoning model. Pull one:")
         print(f"    ollama pull {config.REASONING_MODEL}")
         print(f"    ollama pull {config.REASONING_MODEL_FALLBACK}   # lighter fallback")
 

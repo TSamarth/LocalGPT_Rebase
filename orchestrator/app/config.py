@@ -39,7 +39,7 @@ class Config:
     )
     # One hot reasoning model, role-prompted per agent. keep_alive=-1 → stay resident.
     REASONING_MODEL: str = field(
-        default_factory=lambda: _env("REASONING_MODEL", "qwen2.5:14b-instruct-q4_K_M")
+        default_factory=lambda: _env("REASONING_MODEL", "qwen2.5:14b")
     )
     # Lighter fallback if 14B + context won't fit the VRAM envelope.
     REASONING_MODEL_FALLBACK: str = field(
@@ -47,7 +47,7 @@ class Config:
     )
     # Embedding model — must match the one the crawl4ai MCP uses for ChromaDB.
     EMBED_MODEL: str = field(
-        default_factory=lambda: _env("EMBED_MODEL", "nomic-embed-text")
+        default_factory=lambda: _env("EMBED_MODEL", "nomic-embed-text:latest")
     )
     # Context window cap (tokens) — bounds KV cache so VRAM stays < 14 GB (G2).
     MODEL_CONTEXT_TOKENS: int = field(
@@ -74,8 +74,20 @@ class Config:
 
     # ── Research loop / stop-rule (architecture.md §4) ─────────────────────────
     # Hard cap on Acquire→Extract→Verify passes per subtopic (runaway guard).
+    # Flat fallback; the live loop uses the depth-scaled caps below via depth_budget.
     MAX_ITERATIONS_PER_SUBTOPIC: int = field(
         default_factory=lambda: _env_int("MAX_ITERATIONS_PER_SUBTOPIC", 4)
+    )
+    # Adaptive-depth loop budgets (T4.3): per-subtopic pass cap scaled by plan depth.
+    # Deeper plans earn more passes to hit their higher target_evidence.
+    MAX_ITER_SHALLOW: int = field(
+        default_factory=lambda: _env_int("MAX_ITER_SHALLOW", 2)
+    )
+    MAX_ITER_NORMAL: int = field(
+        default_factory=lambda: _env_int("MAX_ITER_NORMAL", 4)
+    )
+    MAX_ITER_DEEP: int = field(
+        default_factory=lambda: _env_int("MAX_ITER_DEEP", 6)
     )
     # Diminishing-returns floor: stop a subtopic if a pass adds fewer than this
     # many new unique claims.

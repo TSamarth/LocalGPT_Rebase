@@ -13,14 +13,16 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from .config import config
-from .schemas import Depth, Stage
+from .schemas import Depth, Stage, Subtopic
 from .session import SessionStore
 from .stage_machine import (
     ResearchPhase,
+    depth_budget,
     first_phase,
     is_terminal,
     next_phase,
     next_stage,
+    stop_rule,
 )
 
 # A handler does a stage's work (call agent, persist artifact). The skeleton's
@@ -44,10 +46,15 @@ class Orchestrator:
             self.handlers.update(handlers)
         # Post-stage handlers — fire after a stage's work (CP1 on PLAN, CP2 on WRITE).
         self.post_handlers: dict[Stage, Handler] = {}
-        # Research sub-phase handlers — fire after a phase (CP3 on MID_ACQUIRE).
+        # Research sub-phase handlers — fire per phase (acquire/extract/verify +
+        # CP3 on MID_ACQUIRE). Phase handlers read ``self.current_subtopic`` to know
+        # which subtopic they operate on, and communicate via ``self.store``.
         self.phase_handlers: dict[ResearchPhase, Handler] = {}
-        # Visited research sub-phases of the current pass (CP3 lands here on deep).
+        # Visited research sub-phases across the RESEARCH stage (CP3 lands here on
+        # deep; the deep-only gate G5 is verified against this trace).
         self.phase_trace: list[ResearchPhase] = []
+        # Subtopic the research loop is currently working (None outside RESEARCH).
+        self.current_subtopic: Optional[Subtopic] = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     @classmethod
@@ -78,7 +85,7 @@ class Orchestrator:
             return current
 
         if current == Stage.RESEARCH:
-            self._run_research_pass()
+            self._run_research()
         else:
             self.handlers[current](self)
 
@@ -96,21 +103,51 @@ class Orchestrator:
         return self.stage
 
     # ── research loop (inside Stage.RESEARCH) ─────────────────────────────────
-    def _run_research_pass(self) -> None:
-        """One acquire→[mid-acquire CP3]→extract→verify pass.
+    def _run_research(self) -> None:
+        """Per-subtopic, budget-bounded research loop (T4.1, architecture.md §4).
 
-        Skeleton runs a single pass; the stop-rule + budget caps (T5.1) decide
-        multi-pass continuation later. The phase trace records whether CP3 fired,
-        which the deep-only checkpoint gate (G5) is verified against.
+        For each plan subtopic, run acquire→[mid-acquire CP3]→extract→verify passes
+        until :func:`stop_rule` fires (target_evidence met, diminishing returns, or
+        the depth-scaled per-subtopic budget is hit). The ledger accumulates across
+        passes and subtopics; ``phase_trace`` records every visited phase so the
+        deep-only CP3 gate (G5) is verifiable.
         """
-        depth = self._plan_depth()
+        plan = self.store.load_plan()
+        if plan is None:
+            return  # nothing planned (skeleton/stub run) — leave RESEARCH cleanly
+        depth = plan.depth
+        budget = depth_budget(depth)
         self.phase_trace = []
+
+        for subtopic in plan.subtopics:
+            self.current_subtopic = subtopic
+            iteration = 0
+            new_claims = 0
+            while not stop_rule(
+                self.store.load_ledger(),
+                subtopic,
+                iteration=iteration,
+                new_claims=new_claims,
+                budget=budget,
+            ):
+                before = len(self.store.load_ledger().claims)
+                self._run_one_pass(depth)
+                after = len(self.store.load_ledger().claims)
+                new_claims = after - before
+                iteration += 1
+                self.store.set_stage(
+                    Stage.RESEARCH,
+                    current_subtopic_id=subtopic.id,
+                    iteration=iteration,
+                )
+
+        self.current_subtopic = None
+
+    def _run_one_pass(self, depth: Depth) -> None:
+        """Walk one acquire→[mid-acquire CP3]→extract→verify pass over the phase
+        handlers. CP3 (MID_ACQUIRE) is only visited on deep plans (next_phase gate)."""
         phase: Optional[ResearchPhase] = first_phase()
         while phase is not None:
             self.phase_trace.append(phase)
             self.phase_handlers.get(phase, _stub)(self)
             phase = next_phase(phase, depth=depth)
-
-    def _plan_depth(self) -> Depth:
-        plan = self.store.load_plan()
-        return plan.depth if plan is not None else Depth.NORMAL
