@@ -32,3 +32,6 @@ htmlcov/
 .vscode/
 /.claude/
 /.serena/
+
+#Temp Docs
+claudedocs/

@@ -38,10 +38,11 @@
 - **A2A pipeline: `orchestrator/` (NEW, sibling to mcp/)** — `app/{schemas,config,session}.py`, `main.py`, `scripts/check_setup.py`, `tests/`.
 - Skills available: `crawl4ai`, `fastmcp`, `mcp-builder`.
 
-## Orchestrator Package (current state — Stories 1–5 done; v1→v2 migration started, E0+E1 landed)
+## Orchestrator Package (current state — Stories 1–5 done; v1→v2 migration started, E0+E1+E2.S1 landed)
 - Managed with `uv`. `pyproject.toml` deps: **`google-adk[a2a]>=2.3,<3`** (✅ E1.T1; +a2a-sdk 0.3.26 transitive), ollama, pydantic>=2, python-dotenv, httpx, litellm>=1.0, **mcp** (required by ADK `MCPToolset`; added in Story 5).
 - **Local venv is Python 3.13** (`orchestrator/.venv`, conda env `LocalGPT_Rebase`).
-- Run tests: `uv run pytest -q` (from `orchestrator/`) — **216 orchestrator tests green** (203 + 5 E1 + 13 E0; was 14 at Story 1); +MCP 43 green.
+- Run tests: `uv run pytest -q` (from `orchestrator/`) — **220 orchestrator tests green** (203 + 5 E1 + 13 E0 + 4 E2.S1; was 14 at Story 1); +MCP 43 green.
 - Setup probe (G2 — user must run): `python scripts/check_setup.py` — checks Ollama + models + `ollama ps` VRAM.
 - Schemas use **Pydantic v2** (`.model_dump_json` / `.model_validate_json` for artifact persistence).
-- Key modules: `app/{schemas,config,session,llm,stage_machine,orchestrator,checkpoint,pipeline,jsonio,citation}.py`; `app/agents/{clarifier,planner,acquirer,extractor,verifier,writer}.py`.
+- Key modules: `app/{schemas,config,session,llm,stage_machine,orchestrator,checkpoint,pipeline,jsonio,citation}.py`; `app/agents/{clarifier,planner,acquirer,extractor,verifier,writer}.py`. **v2 shell (E2.S1):** `app/workflow.py` (ADK dynamic `Workflow` + `research` `@node` + `build_research_workflow` DI seam) · `app/adk_app.py` (`App` + `ResumabilityConfig`) · `tests/test_workflow.py`.
+- **ADK 2.x dynamic-workflow API anchors (verified against installed 2.3.0, E2.S1):** `from google.adk import Context, Workflow`; `from google.adk.workflow import node, START`; **`from google.adk.events import RequestInput`** (NOT `google.adk.workflow`); `from google.adk.apps import App, ResumabilityConfig`; `from google.adk.runners import InMemoryRunner`. Gotchas: the START-entry node's passthrough param must be named **`node_input`**; `ctx.run_node(...)` returns a node's `BaseModel` output as a **`model_dump()` dict** (coerce via the agents' `parse_*` helpers); resume via `runner.run_async(..., invocation_id=...)`.
