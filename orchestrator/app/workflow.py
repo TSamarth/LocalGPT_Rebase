@@ -37,21 +37,24 @@ E3.S2 — see the note on the ``store`` seam below).
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Callable, Optional
 
 from google.adk import Context, Workflow
 from google.adk.events import RequestInput
 from google.adk.workflow import START, node
 from google.adk.workflow._base_node import BaseNode
 
-from .agents.acquirer import build_acquirer, parse_scored_urls
+# Imported as MODULES (not symbols) so their ``_build_default_toolset`` /
+# ``build_<x>`` attributes stay monkeypatchable in the node-path lifecycle tests
+# (mirrors how ``pipeline`` reaches the agent factories for the Tier-0 fixtures).
+from .agents import acquirer as acquirer_mod
+from .agents import extractor as extractor_mod
+from .agents import verifier as verifier_mod
 from .agents.clarifier import build_clarifier, parse_clarify_result
-from .agents.extractor import build_extractor
 from .agents.planner import build_planner, parse_plan
-from .agents.verifier import build_verifier, enrich_ledger, parse_ledger
 from .llm import build_model
 from .research_policy import depth_budget, merge_ledger, stop_rule
-from .schemas import ClaimLedger, ResearchPlan
+from .schemas import ClaimLedger, Depth, ResearchPlan, Subtopic
 from .session import SessionStore
 
 
@@ -108,6 +111,7 @@ def build_research_workflow(
     acquirer_node: Optional[BaseNode] = None,
     extractor_node: Optional[BaseNode] = None,
     verifier_node: Optional[BaseNode] = None,
+    cp3_hook: Optional[Callable[[Subtopic, int], None]] = None,
 ) -> Workflow:
     """Build the research ``Workflow`` (the START→CP1 slice).
 
@@ -140,14 +144,23 @@ def build_research_workflow(
             ``build_verifier``. Its raw output is re-enriched via
             :func:`enrich_ledger` (the node path skips v1's auto-enrich).
 
+        cp3_hook: optional CP3 deep-only pass-through (T5). Called once per loop
+            pass — *only* when the approved plan's depth is ``Depth.DEEP`` — as
+            ``cp3_hook(subtopic, iteration)`` at the seam between acquire and
+            extract (mirrors v1 ``next_phase`` MID_ACQUIRE deep-gating). This is a
+            structural placeholder: the real ``RequestInput`` CP3 with the
+            ``+add/-exclude/r/d`` adapter lands in E3.S1. ``None`` (default) = no
+            hook, so shallow/normal runs are unchanged.
+
     Returns:
         A ``Workflow`` whose single edge runs the ``research`` node from START.
     """
+    # Only clarifier/planner are resolved at build time — they hold NO toolsets.
+    # The acquirer/extractor/verifier (which OWN crawl4ai MCP toolsets) are built
+    # once per RUN at loop entry inside the ``research`` node so a single toolset
+    # is shared across all passes and closed in a ``finally`` (T4).
     clarifier = clarifier_node if clarifier_node is not None else build_clarifier(model=build_model())
     planner = planner_node if planner_node is not None else build_planner(model=build_model())
-    acquirer = acquirer_node if acquirer_node is not None else build_acquirer()
-    extractor = extractor_node if extractor_node is not None else build_extractor()
-    verifier = verifier_node if verifier_node is not None else build_verifier()
 
     @node(rerun_on_resume=True)
     async def research(ctx: Context, node_input: str) -> ClaimLedger:
@@ -185,6 +198,34 @@ def build_research_workflow(
         # (which also re-applies the depth policy to any edited subtopics).
         approved = parse_plan(await ctx.run_node(_cp1_checkpoint, plan))
 
+        # ── Toolset-once / close() lifecycle (E2.S2 T4) ──────────────────────
+        # Build each OWNED crawl4ai MCPToolset exactly ONCE per run here at loop
+        # entry, share it across every acquire/extract/verify pass, and close it
+        # in the ``finally`` below. This delivers the once-per-run lifecycle that
+        # v1 could not (each v1 ``_drive`` ran under its own ``asyncio.run``, so a
+        # stdio toolset was bound to a single drive call). Ownership rule mirrors
+        # ``pipeline._drive_extractor``: an INJECTED node is caller-owned, so we
+        # build/close NO toolset for it; only a defaulted agent owns its toolset.
+        owned_toolsets = []
+        if acquirer_node is not None:
+            acquirer = acquirer_node
+        else:
+            acquirer_ts = acquirer_mod._build_default_toolset()
+            acquirer = acquirer_mod.build_acquirer(acquirer_ts)
+            owned_toolsets.append(acquirer_ts)
+        if extractor_node is not None:
+            extractor = extractor_node
+        else:
+            extractor_ts = extractor_mod._build_default_toolset()
+            extractor = extractor_mod.build_extractor(extractor_ts)
+            owned_toolsets.append(extractor_ts)
+        if verifier_node is not None:
+            verifier = verifier_node
+        else:
+            verifier_ts = verifier_mod._build_default_toolset()
+            verifier = verifier_mod.build_verifier(toolset=verifier_ts)
+            owned_toolsets.append(verifier_ts)
+
         # ── Research loop (E2.S2 T2+T3): port of v1 ``_run_research`` ─────────
         # ONE store-backed accumulator across ALL subtopics; subtopics run
         # sequentially (single-box, one hot model). Deterministic schedule order
@@ -192,44 +233,62 @@ def build_research_workflow(
         # auto-generated execution IDs align on resume — NO custom run_id.
         budget = depth_budget(approved.depth)
         ledger = ClaimLedger(claims=[])
-        for subtopic in approved.subtopics:
-            iteration = 0
-            new_claims = 0
-            while not stop_rule(
-                ledger,
-                subtopic,
-                iteration=iteration,
-                new_claims=new_claims,
-                budget=budget,
-            ):
-                before = len(ledger.claims)
+        try:
+            for subtopic in approved.subtopics:
+                iteration = 0
+                new_claims = 0
+                while not stop_rule(
+                    ledger,
+                    subtopic,
+                    iteration=iteration,
+                    new_claims=new_claims,
+                    budget=budget,
+                ):
+                    before = len(ledger.claims)
 
-                acquire_payload = json.dumps(
-                    {
-                        "subtopic": subtopic.model_dump(mode="json"),
-                        "depth": approved.depth.value,
-                    }
-                )
-                urls = parse_scored_urls(await ctx.run_node(acquirer, acquire_payload))
+                    acquire_payload = json.dumps(
+                        {
+                            "subtopic": subtopic.model_dump(mode="json"),
+                            "depth": approved.depth.value,
+                        }
+                    )
+                    urls = acquirer_mod.parse_scored_urls(
+                        await ctx.run_node(acquirer, acquire_payload)
+                    )
 
-                # T5: CP3 deep-only hook — structural seam between acquire and
-                # extract (no-op now; T5 gates it on ``approved.depth == DEEP``).
+                    # ── T5: CP3 deep-only pass-through hook ───────────────────
+                    # Structural seam between acquire and extract. Gated on
+                    # ``approved.depth == DEEP`` (mirrors v1 ``next_phase``
+                    # MID_ACQUIRE deep-gating); shallow/normal skip it. No
+                    # ``RequestInput`` yet — the real CP3 with the
+                    # ``+add/-exclude/r/d`` adapter is E3.S1. When that lands it
+                    # must use a unique interrupt_id per pass:
+                    # ``f"cp3_{subtopic.id}_{iteration}"``.
+                    if approved.depth == Depth.DEEP and cp3_hook is not None:
+                        cp3_hook(subtopic, iteration)
 
-                # Extract crawls into ChromaDB; page-ids are discarded (as v1).
-                await ctx.run_node(
-                    extractor,
-                    json.dumps([u.model_dump(mode="json") for u in urls]),
-                )
+                    # Extract crawls into ChromaDB; page-ids are discarded (as v1).
+                    await ctx.run_node(
+                        extractor,
+                        json.dumps([u.model_dump(mode="json") for u in urls]),
+                    )
 
-                # The node path calls the verifier agent directly, which does NOT
-                # auto-enrich — so re-apply ``enrich_ledger`` to match v1's status/
-                # confidence recompute (v1 ``verify`` always re-enriches).
-                new = enrich_ledger(parse_ledger(await ctx.run_node(verifier, subtopic.question)))
-                ledger = merge_ledger(ledger, new)
+                    # The node path calls the verifier agent directly, which does
+                    # NOT auto-enrich — so re-apply ``enrich_ledger`` to match v1's
+                    # status/confidence recompute (v1 ``verify`` always re-enriches).
+                    new = verifier_mod.enrich_ledger(
+                        verifier_mod.parse_ledger(await ctx.run_node(verifier, subtopic.question))
+                    )
+                    ledger = merge_ledger(ledger, new)
 
-                after = len(ledger.claims)
-                new_claims = after - before
-                iteration += 1
+                    after = len(ledger.claims)
+                    new_claims = after - before
+                    iteration += 1
+        finally:
+            # Close each OWNED toolset once (idempotent in ADK; injected nodes
+            # left open — caller owns their lifecycle). Runs even if the loop raised.
+            for ts in owned_toolsets:
+                await ts.close()
 
         # ── T6 write-through safety net (additive; demoted in E3.S2) ─────────
         if store is not None:

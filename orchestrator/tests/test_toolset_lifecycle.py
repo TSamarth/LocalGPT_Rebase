@@ -11,11 +11,37 @@ so a stdio toolset is bound to a single drive call and cannot be shared across t
 research passes — a single long-lived toolset is a v2 node-path property (E2.S2.T4).
 The achievable+correct Tier-0 invariant tested here is *close-once-per-owned-build,
 never-close-when-injected*, which removes the subprocess leak.
+
+E2.S2.T4 adds the v2 node-path lifecycle below: the ``research`` node now builds
+each OWNED crawl4ai toolset ONCE per run at loop entry, shares it across every
+acquire/extract/verify pass, and closes it once in a ``finally``. The tests there
+drive the real workflow (through CP1 into the loop) with the agent factories
+monkeypatched to return canned ``@node`` stubs, asserting each owned toolset's
+``.closed == 1`` (built-once/closed-once) and that an INJECTED node builds/closes
+no toolset (caller-owned), mirroring the *never-close-when-injected* rule above.
 """
 from __future__ import annotations
 
+from google.adk.workflow import node
+
 from app import pipeline
-from app.agents import extractor, verifier
+from app.agents import acquirer, extractor, verifier
+from app.schemas import (
+    Claim,
+    ClaimLedger,
+    ClaimStatus,
+    CrawlStrategy,
+    Depth,
+    ResearchPlan,
+    ScoredURL,
+    SourceRef,
+    Subtopic,
+)
+from app.workflow import build_research_workflow
+from tests.test_workflow import (
+    _drive_to_cp1_and_resume,
+    _single_subtopic_planner_stub,
+)
 
 
 class _FakeToolset:
@@ -76,3 +102,141 @@ async def test_verify_runner_leaves_injected_toolset_open(monkeypatch):
     await runner("payload")
 
     assert fake.closed == 0
+
+
+# ── v2 node-path lifecycle (E2.S2 T4): toolset built once / closed once ────────
+def _canned_acquirer_node(_toolset) -> object:
+    """Factory stub: ignores the (fake) toolset, returns a canned acquirer node."""
+
+    @node
+    async def _stub(node_input: str) -> list[ScoredURL]:
+        return [
+            ScoredURL(
+                url="https://a.example/doc",
+                score=0.9,
+                strategy=CrawlStrategy.CRAWL,
+                etld1="a.example",
+            )
+        ]
+
+    return _stub
+
+
+def _canned_extractor_node(_toolset) -> object:
+    """Factory stub: returns a canned extractor node (page-ids discarded by loop)."""
+
+    @node
+    async def _stub(node_input: str) -> list[str]:
+        return ["page-1"]
+
+    return _stub
+
+
+def _canned_verifier_node(*, toolset) -> object:
+    """Factory stub (keyword-only ``toolset``, matching ``build_verifier``).
+
+    Returns a node emitting one KEPT-able claim (two independent sources) so the
+    single-subtopic loop stops on target-met after a single pass — keeping the
+    run short while still exercising every acquire/extract/verify node once.
+    """
+
+    @node
+    async def _stub(node_input: str) -> ClaimLedger:
+        return ClaimLedger(
+            claims=[
+                Claim(
+                    id="c1",
+                    subtopic_id="s1",
+                    text="assertion c1",
+                    status=ClaimStatus.UNCORROBORATED,
+                    sources=[
+                        SourceRef(url="https://a.example/1", etld1="a.example", quote="q1"),
+                        SourceRef(url="https://b.example/1", etld1="b.example", quote="q2"),
+                    ],
+                )
+            ]
+        )
+
+    return _stub
+
+
+def _approve_one_subtopic() -> ResearchPlan:
+    """A 1-subtopic SHALLOW plan with target_evidence=1 → loop stops after 1 pass."""
+    return ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.SHALLOW,
+    )
+
+
+async def test_node_path_builds_and_closes_each_owned_toolset_once(monkeypatch):
+    """T4 gate: with NO injected agent nodes, the ``research`` node builds each
+    owned crawl4ai toolset once per run and closes it exactly once in ``finally``.
+
+    All three agent factories (and their ``_build_default_toolset``) are
+    monkeypatched: the toolsets become ``_FakeToolset`` close-counters and the
+    builders return canned ``@node`` stubs, so the loop runs fully offline.
+    """
+    acquirer_ts = _FakeToolset()
+    extractor_ts = _FakeToolset()
+    verifier_ts = _FakeToolset()
+    monkeypatch.setattr(acquirer, "_build_default_toolset", lambda: acquirer_ts)
+    monkeypatch.setattr(extractor, "_build_default_toolset", lambda: extractor_ts)
+    monkeypatch.setattr(verifier, "_build_default_toolset", lambda: verifier_ts)
+    monkeypatch.setattr(acquirer, "build_acquirer", _canned_acquirer_node)
+    monkeypatch.setattr(extractor, "build_extractor", _canned_extractor_node)
+    monkeypatch.setattr(verifier, "build_verifier", _canned_verifier_node)
+
+    # Build with NO acquirer/extractor/verifier nodes injected → all defaulted →
+    # all three toolsets are OWNED by the node. Clarifier/planner are canned (no
+    # toolsets) so the slice runs offline to the loop.
+    workflow = build_research_workflow(
+        clarifier_node=_simple_clarifier(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.SHALLOW),
+    )
+    result = await _drive_to_cp1_and_resume(workflow, approved_plan=_approve_one_subtopic())
+
+    assert isinstance(result, ClaimLedger)
+    assert acquirer_ts.closed == 1, f"acquirer toolset close count: {acquirer_ts.closed}"
+    assert extractor_ts.closed == 1, f"extractor toolset close count: {extractor_ts.closed}"
+    assert verifier_ts.closed == 1, f"verifier toolset close count: {verifier_ts.closed}"
+
+
+async def test_node_path_injected_agent_builds_no_toolset(monkeypatch):
+    """T4 gate: an INJECTED agent node is caller-owned — the node builds and closes
+    NO toolset for it (``_build_default_toolset`` is never called for that agent).
+
+    We inject canned acquirer/extractor/verifier nodes and make every
+    ``_build_default_toolset`` raise: if the node tried to build an owned toolset
+    for an injected agent the run would blow up. A clean terminal ledger proves no
+    toolset was built (and so none was closed) for the injected path.
+    """
+    def _boom() -> object:
+        raise AssertionError("owned toolset built for an INJECTED agent node")
+
+    monkeypatch.setattr(acquirer, "_build_default_toolset", _boom)
+    monkeypatch.setattr(extractor, "_build_default_toolset", _boom)
+    monkeypatch.setattr(verifier, "_build_default_toolset", _boom)
+
+    workflow = build_research_workflow(
+        clarifier_node=_simple_clarifier(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.SHALLOW),
+        acquirer_node=_canned_acquirer_node(None),
+        extractor_node=_canned_extractor_node(None),
+        verifier_node=_canned_verifier_node(toolset=None),
+    )
+    result = await _drive_to_cp1_and_resume(workflow, approved_plan=_approve_one_subtopic())
+
+    assert isinstance(result, ClaimLedger)
+    assert result.kept_count("s1") == 1
+
+
+def _simple_clarifier() -> object:
+    """Minimal canned clarifier node (no toolset) for the node-path lifecycle tests."""
+
+    from app.schemas import ClarifyResult
+
+    @node
+    async def _stub(node_input: str) -> ClarifyResult:
+        return ClarifyResult(status="clear", normalized_query="normalized: " + str(node_input).strip())
+
+    return _stub

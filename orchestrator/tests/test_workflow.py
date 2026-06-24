@@ -548,3 +548,99 @@ async def test_resume_reruns_cp1_only():
     assert {c.id for c in result.claims} == {"c1", "c2"}
     assert result.kept_count("s1") == 1
     assert result.kept_count("s2") == 1
+
+
+# ── T5: CP3 deep-only pass-through hook ──────────────────────────────────────────
+def _recording_cp3_hook(calls: list[tuple[str, int]]):
+    """A CP3 hook that records every (subtopic.id, iteration) it is called with."""
+
+    def _hook(subtopic: Subtopic, iteration: int) -> None:
+        calls.append((subtopic.id, iteration))
+
+    return _hook
+
+
+async def test_cp3_hook_called_per_pass_on_deep_plan():
+    """Deep plan → the CP3 hook is visited once per loop pass (per subtopic+iter).
+
+    One DEEP subtopic with a high target: the verifier adds 2 fresh
+    UNCORROBORATED claims each pass (never KEPT, never diminishing), so only the
+    DEEP budget stops the loop and it runs the full ``MAX_ITER_DEEP`` passes. The
+    hook must fire once per pass, in order, with the matching (subtopic.id, iter).
+    """
+    calls: list[tuple[str, int]] = []
+    # Each pass adds 2 NEW claims (no diminishing) and never KEPT (no target-met),
+    # so only the DEEP budget stops the loop → exactly ``MAX_ITER_DEEP`` passes.
+    budget = config.MAX_ITER_DEEP
+    passes = [
+        ClaimLedger(
+            claims=[
+                _uncorroborated_claim(f"c{p}a", "s1"),
+                _uncorroborated_claim(f"c{p}b", "s1"),
+            ]
+        )
+        for p in range(budget + 2)
+    ]
+    verifier = _verifier_stub_from_passes(passes)
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(99, Depth.DEEP),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        cp3_hook=_recording_cp3_hook(calls),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=99)],
+        depth=Depth.DEEP,
+    )
+    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    # The hook fired once per pass, in iteration order, all for subtopic s1.
+    assert calls == [("s1", i) for i in range(budget)]
+
+
+async def test_cp3_hook_skipped_on_shallow_plan():
+    """Shallow plan → the CP3 hook is NEVER visited (deep-gated no-op)."""
+    calls: list[tuple[str, int]] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.SHALLOW),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        cp3_hook=_recording_cp3_hook(calls),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.SHALLOW,
+    )
+    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    assert calls == [], f"CP3 hook fired on a SHALLOW plan: {calls}"
+
+
+async def test_cp3_hook_skipped_on_normal_plan():
+    """Normal plan → the CP3 hook is NEVER visited (deep-gated no-op)."""
+    calls: list[tuple[str, int]] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        cp3_hook=_recording_cp3_hook(calls),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    assert calls == [], f"CP3 hook fired on a NORMAL plan: {calls}"
