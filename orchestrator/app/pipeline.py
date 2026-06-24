@@ -32,6 +32,7 @@ from .agents import acquirer, clarifier, extractor, planner, verifier
 from .agents.writer import build_writer, coverage_report, render_report
 from .checkpoint import CheckpointRejected, cp1_handler, cp2_handler, cp3_handler
 from .orchestrator import Orchestrator
+from .research_policy import merge_ledger
 from .schemas import ClaimLedger, ResearchPlan, ScoredURL, Stage
 from .session import SessionStore
 from .stage_machine import ResearchPhase
@@ -111,13 +112,8 @@ async def _drive(agent, app_name: str, text: str, output_key: str) -> str:
 # ── ledger merge (research loop accumulation) ────────────────────────────────────
 def _merge_ledger(store: SessionStore, new_ledger: ClaimLedger) -> None:
     """Append claims from ``new_ledger`` into the persisted ledger, deduped by id."""
-    current = store.load_ledger()
-    seen = {c.id for c in current.claims}
-    for claim in new_ledger.claims:
-        if claim.id not in seen:
-            current.claims.append(claim)
-            seen.add(claim.id)
-    store.save_ledger(current)
+    merged = merge_ledger(store.load_ledger(), new_ledger)
+    store.save_ledger(merged)
 
 
 # ── stage handlers ───────────────────────────────────────────────────────────────
