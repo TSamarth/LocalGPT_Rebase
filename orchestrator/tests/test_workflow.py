@@ -31,7 +31,18 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
 from google.genai import types
 
 from app.config import config
-from app.schemas import ClarifyResult, Depth, ResearchPlan, Subtopic
+from app.schemas import (
+    Claim,
+    ClaimLedger,
+    ClaimStatus,
+    ClarifyResult,
+    CrawlStrategy,
+    Depth,
+    ResearchPlan,
+    ScoredURL,
+    SourceRef,
+    Subtopic,
+)
 from app.session import SessionStore
 from app.workflow import build_research_workflow
 
@@ -67,6 +78,108 @@ def _planner_stub() -> object:
                 Subtopic(id="s2", question=f"angle 2 of {node_input}", target_evidence=99),
             ],
             depth=Depth.DEEP,
+        )
+
+    return _stub
+
+
+def _acquirer_stub() -> object:
+    """Canned acquirer node: one ScoredURL, no model/MCP call."""
+
+    @node
+    async def _stub(node_input: str) -> list[ScoredURL]:
+        return [
+            ScoredURL(
+                url="https://a.example/doc",
+                score=0.9,
+                strategy=CrawlStrategy.CRAWL,
+                etld1="a.example",
+            )
+        ]
+
+    return _stub
+
+
+def _extractor_stub() -> object:
+    """Canned extractor node: returns page-ids the loop discards (as v1)."""
+
+    @node
+    async def _stub(node_input: str) -> list[str]:
+        return ["page-1"]
+
+    return _stub
+
+
+def _kept_claim(claim_id: str, subtopic_id: str) -> Claim:
+    """A claim that enriches to KEPT — two independent (distinct-etld1) sources."""
+    return Claim(
+        id=claim_id,
+        subtopic_id=subtopic_id,
+        text=f"assertion {claim_id}",
+        status=ClaimStatus.UNCORROBORATED,  # recomputed to KEPT by enrich_ledger
+        sources=[
+            SourceRef(url="https://a.example/1", etld1="a.example", quote="q1"),
+            SourceRef(url="https://b.example/1", etld1="b.example", quote="q2"),
+        ],
+    )
+
+
+def _uncorroborated_claim(claim_id: str, subtopic_id: str) -> Claim:
+    """A claim that stays UNCORROBORATED — a single source (no corroboration)."""
+    return Claim(
+        id=claim_id,
+        subtopic_id=subtopic_id,
+        text=f"assertion {claim_id}",
+        status=ClaimStatus.UNCORROBORATED,
+        sources=[SourceRef(url="https://a.example/1", etld1="a.example", quote="q1")],
+    )
+
+
+def _verifier_stub_from_passes(pass_ledgers: list[ClaimLedger]) -> object:
+    """Canned verifier node driven by a per-pass script.
+
+    Each ``ctx.run_node(verifier, ...)`` call returns the next ledger in
+    ``pass_ledgers``; once exhausted it returns an empty ledger (adds nothing).
+    A list-index closure makes the controlled claim sets drive each stop-rule exit
+    deterministically. The loop re-applies ``enrich_ledger`` to the returned
+    ledger, so claim status is recomputed from source independence.
+    """
+    calls = {"i": 0}
+
+    @node
+    async def _stub(node_input: str) -> ClaimLedger:
+        i = calls["i"]
+        calls["i"] += 1
+        if i < len(pass_ledgers):
+            return pass_ledgers[i]
+        return ClaimLedger(claims=[])
+
+    return _stub
+
+
+def _build_loop_workflow(*, planner_node, verifier_node, store=None):
+    """Build a fully-offline workflow with all five nodes injected (canned)."""
+    return build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=planner_node,
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier_node,
+        store=store,
+    )
+
+
+def _single_subtopic_planner_stub(target_evidence: int, depth: Depth) -> object:
+    """Planner stub: ONE subtopic with an explicit target_evidence, so a single
+    while-loop drives one stop-rule exit. ``parse_plan`` re-applies the depth
+    policy, so the SHALLOW/NORMAL target is what config maps; we use the matching
+    config target to keep the asserted exit condition unambiguous."""
+
+    @node
+    async def _stub(node_input: str) -> ResearchPlan:
+        return ResearchPlan(
+            subtopics=[Subtopic(id="s1", question="only angle", target_evidence=target_evidence)],
+            depth=depth,
         )
 
     return _stub
@@ -115,8 +228,8 @@ def _build_app(workflow) -> App:
     )
 
 
-async def _drive_to_cp1_and_resume(workflow, *, approved_plan: ResearchPlan) -> ResearchPlan:
-    """Drive the slice to the CP1 pause, then resume with ``approved_plan``.
+async def _drive_to_cp1_and_resume(workflow, *, approved_plan: ResearchPlan) -> ClaimLedger:
+    """Drive the slice to the CP1 pause, resume with ``approved_plan``, run the loop.
 
     The CP1 ``_cp1_checkpoint`` node yields ``RequestInput`` and interrupts. We:
       1. run the runner, draining events until the ``adk_request_input``
@@ -130,8 +243,10 @@ async def _drive_to_cp1_and_resume(workflow, *, approved_plan: ResearchPlan) -> 
          ``response_schema`` and feeds it back as the node's output, so the
          parent ``research`` node finishes and emits the terminal plan.
 
-    Returns the terminal ``ResearchPlan`` (parsed from ``Event.output``, which
-    ADK serializes via ``model_dump()`` — hence the ``model_validate``).
+    The ``research`` node now runs the per-subtopic research loop after CP1, so
+    the terminal output is the accumulated ``ClaimLedger`` (parsed from
+    ``Event.output``, which ADK serializes via ``model_dump()`` — hence the
+    ``model_validate``).
     """
     app = _build_app(workflow)
     runner = InMemoryRunner(app=app)
@@ -168,92 +283,169 @@ async def _drive_to_cp1_and_resume(workflow, *, approved_plan: ResearchPlan) -> 
     ):
         if event.output is not None:
             final_output = event.output
-    return ResearchPlan.model_validate(final_output)
+    return ClaimLedger.model_validate(final_output)
 
 
-# ── Case (a): slice runs START→CP1→resume(approve) and returns the plan ────────
-async def test_slice_returns_approved_research_plan():
-    workflow = build_research_workflow(
-        clarifier_node=_clarifier_stub(),
-        planner_node=_planner_stub(),
+# ── Case (a): slice runs START→CP1→resume(approve)→loop and returns the ledger ──
+async def test_slice_returns_accumulated_ledger():
+    # The approved plan has 2 subtopics, each target_evidence=1. The verifier stub
+    # returns ONE KEPT claim per subtopic, so each subtopic's stop-rule fires on
+    # target-met after a single pass — the loop accumulates a 2-claim ledger.
+    verifier = _verifier_stub_from_passes(
+        [
+            ClaimLedger(claims=[_kept_claim("c1", "s1")]),
+            ClaimLedger(claims=[_kept_claim("c2", "s2")]),
+        ]
     )
-    # Approve the plan unchanged at CP1: resume with the same shape the planner
-    # stub produced. The slice's ``parse_plan`` re-applies the depth policy to
-    # the resumed plan, so the terminal target_evidence is the normalized value.
+    workflow = _build_loop_workflow(planner_node=_planner_stub(), verifier_node=verifier)
     approve_plan = ResearchPlan(
         subtopics=[
-            Subtopic(id="s1", question="angle 1", target_evidence=config.TARGET_EVIDENCE_DEEP),
-            Subtopic(id="s2", question="angle 2", target_evidence=config.TARGET_EVIDENCE_DEEP),
+            Subtopic(id="s1", question="angle 1", target_evidence=1),
+            Subtopic(id="s2", question="angle 2", target_evidence=1),
         ],
         depth=Depth.DEEP,
     )
     result = await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
 
-    assert isinstance(result, ResearchPlan)
-    assert len(result.subtopics) == 2
-    # Depth policy applied in the slice: deep → TARGET_EVIDENCE_DEEP.
-    assert result.depth == Depth.DEEP
-    assert all(
-        s.target_evidence == config.TARGET_EVIDENCE_DEEP for s in result.subtopics
-    )
+    assert isinstance(result, ClaimLedger)
+    # One KEPT claim accumulated per subtopic across the loop.
+    assert {c.id for c in result.claims} == {"c1", "c2"}
+    assert result.kept_count("s1") == 1
+    assert result.kept_count("s2") == 1
 
 
-# ── Case (b) (T4 gate): an EDITED plan supplied at CP1 round-trips to final ─────
-async def test_cp1_edited_plan_round_trips():
-    workflow = build_research_workflow(
-        clarifier_node=_clarifier_stub(),
-        planner_node=_planner_stub(),
+# ── Case (b) (T4 gate): an EDITED plan supplied at CP1 drives the loop ───────────
+async def test_cp1_edited_plan_drives_loop():
+    # The human edits the plan at CP1 down to ONE subtopic. The loop must run over
+    # the EDITED plan (not the planner's 2-subtopic output): a single KEPT claim
+    # for the surviving subtopic proves the resumed plan is what drives the loop.
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
     )
-    # The human edits the plan at CP1: drop a subtopic and reword the survivor.
-    # This differs from the planner stub (2 subtopics), so a passthrough would
-    # fail — proving the human response (not the planner output) is what wins.
+    workflow = _build_loop_workflow(planner_node=_planner_stub(), verifier_node=verifier)
     edited = ResearchPlan(
         subtopics=[
-            Subtopic(
-                id="s1",
-                question="EDITED: only rust async runtime fairness",
-                target_evidence=config.TARGET_EVIDENCE_DEEP,
-            ),
+            Subtopic(id="s1", question="EDITED: only rust async runtime fairness", target_evidence=1),
         ],
         depth=Depth.DEEP,
     )
     result = await _drive_to_cp1_and_resume(workflow, approved_plan=edited)
 
-    assert isinstance(result, ResearchPlan)
-    assert len(result.subtopics) == 1
-    assert result.subtopics[0].id == "s1"
-    assert result.subtopics[0].question == "EDITED: only rust async runtime fairness"
-    assert result.depth == Depth.DEEP
-    assert result.subtopics[0].target_evidence == config.TARGET_EVIDENCE_DEEP
+    assert isinstance(result, ClaimLedger)
+    assert {c.id for c in result.claims} == {"c1"}
+    assert result.claims[0].subtopic_id == "s1"
+    assert result.kept_count("s1") == 1
 
 
-# ── T6: SessionStore write-through lands plan.json during the slice run ─────────
-async def test_store_write_through_persists_plan():
+# ── T6: SessionStore write-through lands ledger.json during the run ──────────────
+async def test_store_write_through_persists_ledger():
     store = SessionStore.create(RAW_QUERY)
-    workflow = build_research_workflow(
-        clarifier_node=_clarifier_stub(),
-        planner_node=_planner_stub(),
-        store=store,
+    verifier = _verifier_stub_from_passes(
+        [
+            ClaimLedger(claims=[_kept_claim("c1", "s1")]),
+            ClaimLedger(claims=[_kept_claim("c2", "s2")]),
+        ]
+    )
+    workflow = _build_loop_workflow(
+        planner_node=_planner_stub(), verifier_node=verifier, store=store
     )
     approve_plan = ResearchPlan(
         subtopics=[
-            Subtopic(id="s1", question="angle 1", target_evidence=config.TARGET_EVIDENCE_DEEP),
-            Subtopic(id="s2", question="angle 2", target_evidence=config.TARGET_EVIDENCE_DEEP),
+            Subtopic(id="s1", question="angle 1", target_evidence=1),
+            Subtopic(id="s2", question="angle 2", target_evidence=1),
         ],
         depth=Depth.DEEP,
     )
     await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
 
-    plan_path = store.dir / SessionStore.PLAN_FILE
-    assert plan_path.exists(), "T6 write-through did not persist plan.json"
-    persisted = store.load_plan()
-    assert isinstance(persisted, ResearchPlan)
-    # Persisted plan is the planner's slice output (depth-normalized), written
-    # before the CP1 pause — so it carries the normalized target_evidence.
-    assert len(persisted.subtopics) == 2
-    assert all(
-        s.target_evidence == config.TARGET_EVIDENCE_DEEP for s in persisted.subtopics
+    ledger_path = store.dir / SessionStore.LEDGER_FILE
+    assert ledger_path.exists(), "T6 write-through did not persist ledger.json"
+    persisted = store.load_ledger()
+    assert isinstance(persisted, ClaimLedger)
+    # The persisted ledger is the loop's accumulated product.
+    assert {c.id for c in persisted.claims} == {"c1", "c2"}
+
+
+# ── T2 gate: each of the 3 stop-rule exits fires (target / diminishing / budget) ─
+async def test_stop_rule_exit_target_met():
+    """Exit 1 — target_evidence met: kept_count reaches the subtopic target."""
+    # One subtopic, target_evidence=2. The first pass yields 2 KEPT claims, so
+    # kept_count(s1)==2 >= target after a single pass → stop on target-met.
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1"), _kept_claim("c2", "s1")])]
     )
+    workflow = _build_loop_workflow(
+        planner_node=_single_subtopic_planner_stub(2, Depth.SHALLOW),
+        verifier_node=verifier,
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=2)],
+        depth=Depth.SHALLOW,
+    )
+    result = await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    assert result.kept_count("s1") == 2
+    # Exactly one pass ran (target met immediately) → no extra accumulation.
+    assert len(result.claims) == 2
+
+
+async def test_stop_rule_exit_diminishing_returns():
+    """Exit 2 — diminishing returns: a completed pass adds < MIN_NEW_CLAIMS."""
+    # target_evidence is high so target-met never fires; budget (NORMAL=4) is not
+    # hit first. Pass 1 adds 2 new UNCORROBORATED claims (>= MIN_NEW_CLAIMS=2, so
+    # no diminishing yet); pass 2 RE-returns the SAME ids (dedup → 0 new) so
+    # new_claims (0) < MIN_NEW_CLAIMS → stop on diminishing returns.
+    assert config.MIN_NEW_CLAIMS == 2
+    assert config.MAX_ITER_NORMAL >= 3
+    pass1 = ClaimLedger(
+        claims=[_uncorroborated_claim("c1", "s1"), _uncorroborated_claim("c2", "s1")]
+    )
+    verifier = _verifier_stub_from_passes([pass1, pass1])  # pass 2 duplicates pass 1
+    workflow = _build_loop_workflow(
+        planner_node=_single_subtopic_planner_stub(99, Depth.NORMAL),
+        verifier_node=verifier,
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=99)],
+        depth=Depth.NORMAL,
+    )
+    result = await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    # Two passes ran (pass 2 added 0 new → diminishing); ledger holds 2 deduped.
+    assert result.kept_count("s1") == 0
+    assert {c.id for c in result.claims} == {"c1", "c2"}
+
+
+async def test_stop_rule_exit_budget_hit():
+    """Exit 3 — budget hit: iteration reaches depth_budget without target/diminish."""
+    # target never met (claims stay UNCORROBORATED) and every pass adds >= 2 NEW
+    # claims (so diminishing never fires), so only the SHALLOW budget (2 passes)
+    # can stop the loop → exit on budget hit at iteration == MAX_ITER_SHALLOW.
+    budget = config.MAX_ITER_SHALLOW
+    assert budget == 2
+    passes = [
+        ClaimLedger(
+            claims=[
+                _uncorroborated_claim(f"c{p}a", "s1"),
+                _uncorroborated_claim(f"c{p}b", "s1"),
+            ]
+        )
+        for p in range(budget + 2)  # more than enough; budget stops it first
+    ]
+    verifier = _verifier_stub_from_passes(passes)
+    workflow = _build_loop_workflow(
+        planner_node=_single_subtopic_planner_stub(99, Depth.SHALLOW),
+        verifier_node=verifier,
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=99)],
+        depth=Depth.SHALLOW,
+    )
+    result = await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    assert result.kept_count("s1") == 0
+    # Exactly ``budget`` passes ran, each adding 2 unique claims.
+    assert len(result.claims) == 2 * budget
 
 
 # ── Case (c) (T5 — HARD GATE): resume re-runs CP1 only; clarify/plan skipped ────
@@ -279,9 +471,20 @@ async def test_resume_reruns_cp1_only():
     """
     clarifier_calls: list[int] = []
     planner_calls: list[int] = []
+    # Inject canned loop nodes too, so the resumed run drives the full loop fully
+    # offline. The counting clarifier/planner are the gate instrumentation.
+    verifier = _verifier_stub_from_passes(
+        [
+            ClaimLedger(claims=[_kept_claim("c1", "s1")]),
+            ClaimLedger(claims=[_kept_claim("c2", "s2")]),
+        ]
+    )
     workflow = build_research_workflow(
         clarifier_node=_counting_clarifier_stub(clarifier_calls),
         planner_node=_counting_planner_stub(planner_calls),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
     )
 
     app = _build_app(workflow)
@@ -337,11 +540,11 @@ async def test_resume_reruns_cp1_only():
     assert clarifier_calls == [1], f"GATE FAIL: clarifier re-ran on resume: {clarifier_calls}"
     assert planner_calls == [1], f"GATE FAIL: planner re-ran on resume: {planner_calls}"
 
-    # ── And the resumed run reached a terminal ResearchPlan via the CP1 path. ──
+    # ── And the resumed run reached a terminal ClaimLedger via the CP1 path + ──
+    # the research loop (now running after CP1). One KEPT claim accumulated per
+    # subtopic before each subtopic stopped on diminishing returns.
     assert final_output is not None, "resume did not produce a terminal output"
-    result = ResearchPlan.model_validate(final_output)
-    assert len(result.subtopics) == 2
-    assert result.depth == Depth.DEEP
-    assert all(
-        s.target_evidence == config.TARGET_EVIDENCE_DEEP for s in result.subtopics
-    )
+    result = ClaimLedger.model_validate(final_output)
+    assert {c.id for c in result.claims} == {"c1", "c2"}
+    assert result.kept_count("s1") == 1
+    assert result.kept_count("s2") == 1

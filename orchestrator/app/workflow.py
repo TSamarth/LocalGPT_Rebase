@@ -36,6 +36,7 @@ E3.S2 — see the note on the ``store`` seam below).
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from google.adk import Context, Workflow
@@ -43,10 +44,14 @@ from google.adk.events import RequestInput
 from google.adk.workflow import START, node
 from google.adk.workflow._base_node import BaseNode
 
+from .agents.acquirer import build_acquirer, parse_scored_urls
 from .agents.clarifier import build_clarifier, parse_clarify_result
+from .agents.extractor import build_extractor
 from .agents.planner import build_planner, parse_plan
+from .agents.verifier import build_verifier, enrich_ledger, parse_ledger
 from .llm import build_model
-from .schemas import ResearchPlan
+from .research_policy import depth_budget, merge_ledger, stop_rule
+from .schemas import ClaimLedger, ResearchPlan
 from .session import SessionStore
 
 
@@ -100,6 +105,9 @@ def build_research_workflow(
     clarifier_node: Optional[BaseNode] = None,
     planner_node: Optional[BaseNode] = None,
     store: Optional[SessionStore] = None,
+    acquirer_node: Optional[BaseNode] = None,
+    extractor_node: Optional[BaseNode] = None,
+    verifier_node: Optional[BaseNode] = None,
 ) -> Workflow:
     """Build the research ``Workflow`` (the START→CP1 slice).
 
@@ -122,15 +130,28 @@ def build_research_workflow(
             **Demoted in E3.S2** once ADK persistence is the single source of
             truth. ``None`` (default) = no disk write, so case (a) is unchanged.
 
+        acquirer_node: node run for the per-subtopic Acquire phase. Defaults to the
+            ``build_acquirer`` ``LlmAgent``. ``ctx.run_node`` accepts an ``LlmAgent``
+            directly, so no wrapping is needed.
+        extractor_node: node run for the Extract phase. Defaults to
+            ``build_extractor``; its output is discarded (it crawls into ChromaDB,
+            handing back page-ids the loop does not consume — as in v1).
+        verifier_node: node run for the Verify phase. Defaults to
+            ``build_verifier``. Its raw output is re-enriched via
+            :func:`enrich_ledger` (the node path skips v1's auto-enrich).
+
     Returns:
         A ``Workflow`` whose single edge runs the ``research`` node from START.
     """
     clarifier = clarifier_node if clarifier_node is not None else build_clarifier(model=build_model())
     planner = planner_node if planner_node is not None else build_planner(model=build_model())
+    acquirer = acquirer_node if acquirer_node is not None else build_acquirer()
+    extractor = extractor_node if extractor_node is not None else build_extractor()
+    verifier = verifier_node if verifier_node is not None else build_verifier()
 
     @node(rerun_on_resume=True)
-    async def research(ctx: Context, node_input: str) -> ResearchPlan:
-        """Drive the slice: clarify → plan → CP1, returning the approved plan.
+    async def research(ctx: Context, node_input: str) -> ClaimLedger:
+        """Drive the slice: clarify → plan → CP1 → research loop → ledger.
 
         ``node_input`` is the raw user query: as the START node, ADK hands this
         node the user message and (state-binding mode) passes the ``node_input``
@@ -163,6 +184,57 @@ def build_research_workflow(
         # human-supplied plan comes back as a dict — coerce it via ``parse_plan``
         # (which also re-applies the depth policy to any edited subtopics).
         approved = parse_plan(await ctx.run_node(_cp1_checkpoint, plan))
-        return approved
+
+        # ── Research loop (E2.S2 T2+T3): port of v1 ``_run_research`` ─────────
+        # ONE store-backed accumulator across ALL subtopics; subtopics run
+        # sequentially (single-box, one hot model). Deterministic schedule order
+        # (acquire → extract → verify, same sequence every replay) so ADK's
+        # auto-generated execution IDs align on resume — NO custom run_id.
+        budget = depth_budget(approved.depth)
+        ledger = ClaimLedger(claims=[])
+        for subtopic in approved.subtopics:
+            iteration = 0
+            new_claims = 0
+            while not stop_rule(
+                ledger,
+                subtopic,
+                iteration=iteration,
+                new_claims=new_claims,
+                budget=budget,
+            ):
+                before = len(ledger.claims)
+
+                acquire_payload = json.dumps(
+                    {
+                        "subtopic": subtopic.model_dump(mode="json"),
+                        "depth": approved.depth.value,
+                    }
+                )
+                urls = parse_scored_urls(await ctx.run_node(acquirer, acquire_payload))
+
+                # T5: CP3 deep-only hook — structural seam between acquire and
+                # extract (no-op now; T5 gates it on ``approved.depth == DEEP``).
+
+                # Extract crawls into ChromaDB; page-ids are discarded (as v1).
+                await ctx.run_node(
+                    extractor,
+                    json.dumps([u.model_dump(mode="json") for u in urls]),
+                )
+
+                # The node path calls the verifier agent directly, which does NOT
+                # auto-enrich — so re-apply ``enrich_ledger`` to match v1's status/
+                # confidence recompute (v1 ``verify`` always re-enriches).
+                new = enrich_ledger(parse_ledger(await ctx.run_node(verifier, subtopic.question)))
+                ledger = merge_ledger(ledger, new)
+
+                after = len(ledger.claims)
+                new_claims = after - before
+                iteration += 1
+
+        # ── T6 write-through safety net (additive; demoted in E3.S2) ─────────
+        if store is not None:
+            store.save_ledger(ledger)
+
+        return ledger
 
     return Workflow(name="research", edges=[(START, research)])
