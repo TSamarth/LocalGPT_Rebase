@@ -57,7 +57,6 @@ from .cp3_adapter import apply_cp3_verbs
 from .llm import build_model
 from .research_policy import depth_budget, merge_ledger, stop_rule
 from .schemas import ClaimLedger, Depth, ResearchPlan, ScoredURL
-from .session import SessionStore
 
 # ── Reject signal (E3.S1 T3) ─────────────────────────────────────────────────
 # The v1 console gates raised ``CheckpointRejected`` on a reject; ``run_pipeline``
@@ -280,7 +279,6 @@ def build_research_workflow(
     *,
     clarifier_node: Optional[BaseNode] = None,
     planner_node: Optional[BaseNode] = None,
-    store: Optional[SessionStore] = None,
     acquirer_node: Optional[BaseNode] = None,
     extractor_node: Optional[BaseNode] = None,
     verifier_node: Optional[BaseNode] = None,
@@ -298,15 +296,6 @@ def build_research_workflow(
             accepts an ``LlmAgent`` directly, so no wrapping is needed.
         planner_node: node run for the plan stage. Defaults to the
             ``build_planner`` ``LlmAgent`` on the shared model.
-        store: optional :class:`~app.session.SessionStore` — when provided, the
-            ``research`` node write-throughs the clarify+plan artifacts to
-            ``data/sessions/{id}/`` during the run (T6). This is an **additive
-            safety net**, NOT an execution override: it never gates or replaces
-            ADK's own auto-checkpointed resume state, it only mirrors the plan to
-            disk so a run is inspectable/recoverable outside the ADK event log.
-            **Demoted in E3.S2** once ADK persistence is the single source of
-            truth. ``None`` (default) = no disk write, so case (a) is unchanged.
-
         acquirer_node: node run for the per-subtopic Acquire phase. Defaults to the
             ``build_acquirer`` ``LlmAgent``. ``ctx.run_node`` accepts an ``LlmAgent``
             directly, so no wrapping is needed.
@@ -366,13 +355,6 @@ def build_research_workflow(
         # ``parse_plan`` validates AND applies the deterministic depth policy
         # (``apply_depth_targets``), so the stop-rule targets stay config-driven.
         plan = parse_plan(await ctx.run_node(planner, clarified.normalized_query))
-
-        # ── T6 write-through safety net (additive; demoted in E3.S2) ─────────
-        # Mirror the planned slice to disk so the run is inspectable/recoverable
-        # outside ADK's event log. This is NOT an execution override — it only
-        # persists, it never re-reads to drive control flow.
-        if store is not None:
-            store.save_plan(plan)
 
         # ── CP1 (T4): real RequestInput plan-approval checkpoint ─────────────
         # ``_make_cp1_checkpoint()`` yields RequestInput and pauses; on resume the
@@ -533,10 +515,6 @@ def build_research_workflow(
             for ts in owned_toolsets:
                 await ts.close()
 
-        # ── T6 write-through safety net (additive; demoted in E3.S2) ─────────
-        if store is not None:
-            store.save_ledger(ledger)
-
         # ── T0: run the Writer + render the markdown draft ───────────────────
         # The Writer is reasoning-only (no toolset, no output_schema). Feed it the
         # approved ``ResearchPlan`` + accumulated ``ClaimLedger`` as a JSON payload
@@ -574,12 +552,6 @@ def build_research_workflow(
         approved_draft = reply if reply else draft
         # ── E3.S2 T1: emit approved draft into ADK session state ─────────────
         yield Event(state={"v2_draft": approved_draft})
-
-        # Mirror the (approved/edited) draft to disk so out-of-band inspection and
-        # the final report reflect any edit — same additive write-through pattern
-        # as save_plan/save_ledger.
-        if store is not None:
-            store.save_draft(approved_draft)
 
         # Terminal output: yield the ledger so the ADK framework emits it as the
         # node's output Event(output=ledger.model_dump()).  We use ``yield`` (not
