@@ -40,7 +40,7 @@ import json
 from typing import Optional
 
 from google.adk import Context, Workflow
-from google.adk.events import RequestInput
+from google.adk.events import Event, RequestInput
 from google.adk.workflow import START, node
 from google.adk.workflow._base_node import BaseNode
 
@@ -393,6 +393,8 @@ def build_research_workflow(
             if not _is_cp1_reject(cp1_reply):
                 break
         approved = parse_plan(cp1_reply)
+        # ── E3.S2 T1: emit approved plan into ADK session state ──────────────
+        yield Event(state={"v2_plan": approved.model_dump(mode="json")})
 
         # ── Toolset-once / close() lifecycle (E2.S2 T4) ──────────────────────
         # Build each OWNED crawl4ai MCPToolset exactly ONCE per run here at loop
@@ -440,6 +442,14 @@ def build_research_workflow(
                     new_claims=new_claims,
                     budget=budget,
                 ):
+                    # ── E3.S2 T1: emit loop progress into ADK session state ───
+                    yield Event(
+                        state={
+                            "v2_current_subtopic_id": subtopic.id,
+                            "v2_iteration": iteration,
+                            "v2_budget": budget,
+                        }
+                    )
                     before = len(ledger.claims)
 
                     acquire_payload = json.dumps(
@@ -511,6 +521,8 @@ def build_research_workflow(
                         verifier_mod.parse_ledger(await ctx.run_node(verifier, subtopic.question))
                     )
                     ledger = merge_ledger(ledger, new)
+                    # ── E3.S2 T1: emit accumulated ledger into ADK session state
+                    yield Event(state={"v2_ledger": ledger.model_dump(mode="json")})
 
                     after = len(ledger.claims)
                     new_claims = after - before
@@ -560,6 +572,8 @@ def build_research_workflow(
             if not _is_str_reject(reply):
                 break
         approved_draft = reply if reply else draft
+        # ── E3.S2 T1: emit approved draft into ADK session state ─────────────
+        yield Event(state={"v2_draft": approved_draft})
 
         # Mirror the (approved/edited) draft to disk so out-of-band inspection and
         # the final report reflect any edit — same additive write-through pattern
@@ -567,10 +581,11 @@ def build_research_workflow(
         if store is not None:
             store.save_draft(approved_draft)
 
-        # Terminal output stays the ledger — the draft is a SIDE artifact (now the
-        # CP2-approved markdown, persisted above). Changing the return would break
-        # the v1↔v2 parity gate, which asserts the terminal output is the
-        # ``ClaimLedger``.
-        return ledger
+        # Terminal output: yield the ledger so the ADK framework emits it as the
+        # node's output Event(output=ledger.model_dump()).  We use ``yield`` (not
+        # ``return``) because adding state ``yield`` statements above converted
+        # ``research`` into an async generator — ``return value`` is a SyntaxError
+        # inside a generator in Python 3.
+        yield ledger
 
     return Workflow(name="research", edges=[(START, research)])

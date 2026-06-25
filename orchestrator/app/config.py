@@ -71,6 +71,11 @@ class Config:
     REPORTS_DIR: str = field(
         default_factory=lambda: _env("REPORTS_DIR", "./data/reports")
     )
+    # ADK DatabaseSessionService URL (E3.S2 T1). sqlite+aiosqlite requires the
+    # ``aiosqlite`` driver. Override via SESSION_DB_URL env var for prod.
+    SESSION_DB_URL: str = field(
+        default_factory=lambda: _env("SESSION_DB_URL", "sqlite+aiosqlite:///./data/sessions.db")
+    )
 
     # ── Research loop / stop-rule (architecture.md §4) ─────────────────────────
     # Hard cap on Acquire→Extract→Verify passes per subtopic (runaway guard).
