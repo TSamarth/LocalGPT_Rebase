@@ -276,31 +276,38 @@ async def _run_v2(plan_dict: dict, passes: list[dict]) -> ClaimLedger:
     assert interrupt_id is not None and invocation_id is not None
 
     # Approve the SAME plan dict at CP1 (human-approved = planner output, unchanged),
-    # then answer each per-pass CP3 RequestInput (DEEP plans only) with ``"d"`` (done,
-    # no edits) — mirroring the v1 console CP3 answered ``d``, so neither stack
-    # perturbs the URL list and the ledgers stay identical.
+    # then answer each subsequent RequestInput pause until the terminal ledger:
+    #   * per-pass CP3 (DEEP plans only, ``cp3_*`` interrupt_id) → ``"d"`` (done, no
+    #     edits) — mirroring the v1 console CP3 answered ``d``, so neither stack
+    #     perturbs the URL list;
+    #   * CP2 (unconditional, after the Writer; a non-``cp3_`` UUID interrupt_id) →
+    #     an EMPTY reply, which the CP2 node treats as *approve* (draft unchanged).
+    # Neither answer mutates the ledger, so the v1↔v2 ledger equality is byte-
+    # identical to before CP2 existed.
     new_message = types.Content(
         role="user",
         parts=[create_request_input_response(interrupt_id, plan_dict)],
     )
     final_output = None
     for _ in range(100):
-        pending_cp3 = None
+        pending = None  # (interrupt_id, reply_payload)
         async for event in runner.run_async(
             user_id="test-user", session_id=session.id,
             invocation_id=invocation_id, new_message=new_message,
         ):
             if has_request_input_function_call(event):
                 iid = get_request_input_interrupt_ids(event)[0]
-                assert iid.startswith("cp3_"), f"unexpected pause after CP1: {iid}"
-                pending_cp3 = iid
+                if iid.startswith("cp3_"):
+                    pending = (iid, {"result": "d"})  # CP3 done, no edits
+                else:  # CP2 — approve via empty reply (draft unchanged)
+                    pending = (iid, {"result": ""})
             if event.output is not None:
                 final_output = event.output
-        if pending_cp3 is None:
+        if pending is None:
             break
         new_message = types.Content(
             role="user",
-            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+            parts=[create_request_input_response(pending[0], pending[1])],
         )
     return ClaimLedger.model_validate(final_output)
 
@@ -484,30 +491,33 @@ async def test_resume_mid_loop_skips_completed_passes():
     assert call_log == [], "verifier ran before CP1 resume — loop started too early"
 
     # ── Phase 2: resume by invocation_id; the loop now runs to completion. The
-    # DEEP plan pauses at each per-pass CP3 RequestInput — answer ``"d"`` (no edits)
-    # and keep resuming until the terminal ledger. CP3 is between acquire and verify,
-    # so it does not perturb the verifier call count. ──
+    # DEEP plan pauses at each per-pass CP3 RequestInput (answer ``"d"`` — no edits)
+    # and once at CP2 after the Writer (answer EMPTY — approve, draft unchanged).
+    # Keep resuming until the terminal ledger. Neither pause perturbs the verifier
+    # call count (CP3 is between acquire and verify; CP2 runs after the loop). ──
     new_message = types.Content(
         role="user", parts=[create_request_input_response(interrupt_id, plan)]
     )
     final_output = None
     for _ in range(100):
-        pending_cp3 = None
+        pending = None  # (interrupt_id, reply_payload)
         async for event in runner.run_async(
             user_id="test-user", session_id=session.id,
             invocation_id=invocation_id, new_message=new_message,
         ):
             if has_request_input_function_call(event):
                 iid = get_request_input_interrupt_ids(event)[0]
-                assert iid.startswith("cp3_"), f"unexpected pause: {iid}"
-                pending_cp3 = iid
+                if iid.startswith("cp3_"):
+                    pending = (iid, {"result": "d"})  # CP3 done, no edits
+                else:  # CP2 — approve via empty reply (draft unchanged)
+                    pending = (iid, {"result": ""})
             if event.output is not None:
                 final_output = event.output
-        if pending_cp3 is None:
+        if pending is None:
             break
         new_message = types.Content(
             role="user",
-            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+            parts=[create_request_input_response(pending[0], pending[1])],
         )
 
     # ── THE GATE: each pass ran exactly once across the kill/resume boundary. ──

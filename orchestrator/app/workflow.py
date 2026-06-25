@@ -105,6 +105,62 @@ async def _cp1_checkpoint(node_input: ResearchPlan):
     )
 
 
+def _cp2_summary(draft: str) -> str:
+    """Human-readable draft header for the CP2 prompt.
+
+    Ports the ``=== Checkpoint 2: Draft Report ===`` block from
+    :func:`app.checkpoint.cp2_checkpoint` (the v1 console gate) — header line plus
+    the ``({len(draft)} chars)`` size line — so the same information the user saw
+    at the stdin checkpoint now rides on the ``RequestInput(message=...)`` shown by
+    the ADK HITL client. Kept as a tiny pure helper so the node body stays about
+    control flow, not formatting.
+    """
+    return "\n".join(
+        [
+            "=== Checkpoint 2: Draft Report ===",
+            f"({len(draft)} chars)",
+        ]
+    )
+
+
+@node(rerun_on_resume=False)
+async def _cp2_checkpoint(node_input: str):
+    """Checkpoint 2 (T1) — block for human draft approval via ``RequestInput``.
+
+    ``node_input`` is the rendered markdown ``draft`` (passed by the parent as
+    ``ctx.run_node(_cp2_checkpoint, draft)``). The node ``yield``s a
+    ``RequestInput`` carrying the ported header (``message``), the draft itself
+    (``payload``), and ``response_schema=str`` — which pauses the workflow.
+
+    **Approve/edit resume contract** (verified vs ADK 2.3.0
+    ``_rehydration_utils._unwrap_response``): the human's resume reply is the FINAL
+    draft string. ADK wraps a ``response_schema=str`` reply as ``{"result": <str>}``
+    and unwraps it back to the raw string, so the value the parent receives from
+    ``ctx.run_node`` is whatever markdown the human sent. The parent treats an
+    empty reply as *approve* (keep the draft unchanged) and a non-empty reply as
+    *edit* (the reply IS the edited markdown, round-tripped verbatim). This mirrors
+    CP1's resume contract (the human-supplied value becomes the node output) and
+    the v1 ``cp2_checkpoint`` approve/edit semantics — approve returns the draft as
+    is, edit replaces it with the saved text.
+
+    **Reject is deferred to T3.** T3 owns reject semantics across CP1/CP2/CP3 (a
+    resumable abort). This node is intentionally structured so T3 can add reject
+    cleanly: the resume reply is a plain ``str`` here, and the parent's
+    approve-vs-edit decision lives next to the ``ctx.run_node`` call — a reject
+    sentinel/abort can be layered on without changing this node's shape.
+
+    ``rerun_on_resume=False``: this node does not re-execute on resume — the
+    framework treats the injected response as the node's output directly (the
+    parent ``research`` node, which *calls* ``ctx.run_node``, is the one that is
+    ``rerun_on_resume=True``).
+    """
+    yield RequestInput(
+        message=_cp2_summary(node_input),
+        payload=node_input,
+        response_schema=str,
+    )
+
+
 def _cp3_summary(urls: list[ScoredURL]) -> str:
     """Human-readable candidate-source list for the CP3 prompt.
 
@@ -386,14 +442,25 @@ def build_research_workflow(
         body_markdown = str(await ctx.run_node(writer, writer_payload) or "")
         draft = render_report(approved, ledger, body_markdown=body_markdown)
 
-        # Mirror the draft to disk so CP2 (T1) and out-of-band inspection can read
-        # it — same additive write-through pattern as save_plan/save_ledger.
-        if store is not None:
-            store.save_draft(draft)
+        # ── CP2 (T1): real RequestInput draft-approval checkpoint ────────────
+        # Runs on EVERY path that reaches the Writer (unconditional — NOT deep-
+        # gated). The ``_cp2_checkpoint`` node yields RequestInput and pauses; on
+        # resume the human's reply comes back as a ``str``. Approve = empty reply
+        # (keep ``draft`` unchanged); edit = non-empty reply (the reply IS the
+        # edited markdown, round-tripped verbatim). Reject is deferred to T3.
+        reply = str(await ctx.run_node(_cp2_checkpoint, draft) or "")
+        approved_draft = reply if reply else draft
 
-        # Terminal output stays the ledger — the draft is a SIDE artifact (kept in
-        # ``draft`` for T1/CP2 to consume). Changing the return would break the v1↔v2
-        # parity gate, which asserts the terminal output is the ``ClaimLedger``.
+        # Mirror the (approved/edited) draft to disk so out-of-band inspection and
+        # the final report reflect any edit — same additive write-through pattern
+        # as save_plan/save_ledger.
+        if store is not None:
+            store.save_draft(approved_draft)
+
+        # Terminal output stays the ledger — the draft is a SIDE artifact (now the
+        # CP2-approved markdown, persisted above). Changing the return would break
+        # the v1↔v2 parity gate, which asserts the terminal output is the
+        # ``ClaimLedger``.
         return ledger
 
     return Workflow(name="research", edges=[(START, research)])

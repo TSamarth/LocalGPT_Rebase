@@ -41,6 +41,7 @@ from app.workflow import build_research_workflow
 from tests.test_workflow import (
     _drive_to_cp1_and_resume,
     _single_subtopic_planner_stub,
+    _writer_stub,
 )
 
 
@@ -170,35 +171,51 @@ def _approve_one_subtopic() -> ResearchPlan:
 
 async def test_node_path_builds_and_closes_each_owned_toolset_once(monkeypatch):
     """T4 gate: with NO injected agent nodes, the ``research`` node builds each
-    owned crawl4ai toolset once per run and closes it exactly once in ``finally``.
+    owned crawl4ai toolset and closes EVERY built instance exactly once in
+    ``finally`` — the no-leak invariant (close-once-per-owned-build).
 
-    All three agent factories (and their ``_build_default_toolset``) are
-    monkeypatched: the toolsets become ``_FakeToolset`` close-counters and the
-    builders return canned ``@node`` stubs, so the loop runs fully offline.
+    Each ``_build_default_toolset`` mints a FRESH ``_FakeToolset`` per call (as the
+    real factory mints a new ``MCPToolset`` per call), and we collect them. The
+    ``research`` node is ``rerun_on_resume=True``, so ADK replays the parent on each
+    resume hop: once after the CP1 plan-approval pause, and again after the CP2
+    draft-approval pause (E3.S1 T1). Each replay builds a fresh owned toolset at
+    loop entry (the cached loop ``run_node`` calls are checkpoint-skipped) and
+    closes THAT instance once in ``finally`` — so every built instance has
+    ``closed == 1`` and none leaks. The builders return canned ``@node`` stubs and a
+    writer stub is injected, so the run is fully offline.
     """
-    acquirer_ts = _FakeToolset()
-    extractor_ts = _FakeToolset()
-    verifier_ts = _FakeToolset()
-    monkeypatch.setattr(acquirer, "_build_default_toolset", lambda: acquirer_ts)
-    monkeypatch.setattr(extractor, "_build_default_toolset", lambda: extractor_ts)
-    monkeypatch.setattr(verifier, "_build_default_toolset", lambda: verifier_ts)
+    acquirer_built: list[_FakeToolset] = []
+    extractor_built: list[_FakeToolset] = []
+    verifier_built: list[_FakeToolset] = []
+
+    def _mint(bucket):
+        ts = _FakeToolset()
+        bucket.append(ts)
+        return ts
+
+    monkeypatch.setattr(acquirer, "_build_default_toolset", lambda: _mint(acquirer_built))
+    monkeypatch.setattr(extractor, "_build_default_toolset", lambda: _mint(extractor_built))
+    monkeypatch.setattr(verifier, "_build_default_toolset", lambda: _mint(verifier_built))
     monkeypatch.setattr(acquirer, "build_acquirer", _canned_acquirer_node)
     monkeypatch.setattr(extractor, "build_extractor", _canned_extractor_node)
     monkeypatch.setattr(verifier, "build_verifier", _canned_verifier_node)
 
     # Build with NO acquirer/extractor/verifier nodes injected → all defaulted →
-    # all three toolsets are OWNED by the node. Clarifier/planner are canned (no
-    # toolsets) so the slice runs offline to the loop.
+    # all three toolsets are OWNED by the node. Clarifier/planner/writer are canned
+    # (no toolsets) so the slice runs offline through the loop and CP2.
     workflow = build_research_workflow(
         clarifier_node=_simple_clarifier(),
         planner_node=_single_subtopic_planner_stub(1, Depth.SHALLOW),
+        writer_node=_writer_stub(),
     )
     result = await _drive_to_cp1_and_resume(workflow, approved_plan=_approve_one_subtopic())
 
     assert isinstance(result, ClaimLedger)
-    assert acquirer_ts.closed == 1, f"acquirer toolset close count: {acquirer_ts.closed}"
-    assert extractor_ts.closed == 1, f"extractor toolset close count: {extractor_ts.closed}"
-    assert verifier_ts.closed == 1, f"verifier toolset close count: {verifier_ts.closed}"
+    # At least one owned toolset of each kind was built, and EVERY built instance
+    # was closed exactly once (no double-close on the same instance, no leak).
+    assert acquirer_built and extractor_built and verifier_built
+    for ts in acquirer_built + extractor_built + verifier_built:
+        assert ts.closed == 1, f"owned toolset not closed exactly once: closed={ts.closed}"
 
 
 async def test_node_path_injected_agent_builds_no_toolset(monkeypatch):

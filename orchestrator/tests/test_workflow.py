@@ -501,13 +501,15 @@ async def test_resume_reruns_cp1_only():
     reply = types.Content(role="user", parts=[reply_part])
 
     # ── Phase 2: resume by invocation_id ───────────────────────────────────────
-    # The DEEP plan now pauses at each per-pass CP3 RequestInput after CP1, so we
-    # keep resuming (answering each CP3 with ``"d"`` — no URL edits) until the run
-    # produces its terminal ledger. The same ``invocation_id`` threads all resumes.
+    # The DEEP plan now pauses at each per-pass CP3 RequestInput after CP1, then
+    # once at CP2 after the Writer. We keep resuming (answering each CP3 with
+    # ``"d"`` — no URL edits — and CP2 with an EMPTY reply — approve, draft
+    # unchanged) until the run produces its terminal ledger. The same
+    # ``invocation_id`` threads all resumes.
     final_output = None
     new_message = reply
     for _ in range(100):
-        pending_cp3 = None
+        pending = None  # (interrupt_id, reply_payload)
         async for event in runner.run_async(
             user_id="test-user",
             session_id=session.id,
@@ -516,15 +518,17 @@ async def test_resume_reruns_cp1_only():
         ):
             if has_request_input_function_call(event):
                 iid = get_request_input_interrupt_ids(event)[0]
-                assert iid.startswith("cp3_"), f"unexpected pause: {iid}"
-                pending_cp3 = iid
+                if iid.startswith("cp3_"):
+                    pending = (iid, {"result": "d"})  # CP3 done, no edits
+                else:  # CP2 — approve via empty reply (draft unchanged)
+                    pending = (iid, {"result": ""})
             if event.output is not None:
                 final_output = event.output
-        if pending_cp3 is None:
+        if pending is None:
             break
         new_message = types.Content(
             role="user",
-            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+            parts=[create_request_input_response(pending[0], pending[1])],
         )
 
     # ── THE GATE: clarify/plan were auto-checkpoint-skipped on resume ──────────
@@ -586,14 +590,19 @@ def _recording_extractor_stub(seen_urls: list[list[str]]) -> object:
 
 
 async def _drive_through_checkpoints(
-    workflow, *, approved_plan: ResearchPlan, cp3_reply
+    workflow, *, approved_plan: ResearchPlan, cp3_reply, cp2_reply=""
 ) -> ClaimLedger:
-    """Drive a run through CP1 + every per-pass CP3 RequestInput to the terminal ledger.
+    """Drive a run through CP1 + every per-pass CP3 + CP2 RequestInput to the ledger.
 
     ``cp3_reply`` is either a fixed reply string applied to every CP3 pause, or a
-    callable ``(interrupt_id) -> str`` for per-pass scripting. We loop: run the
-    runner; when it pauses at a RequestInput, dispatch by interrupt_id (CP1 → the
-    approved plan dict; ``cp3_*`` → the verb reply string) and resume by
+    callable ``(interrupt_id) -> str`` for per-pass scripting. ``cp2_reply`` is the
+    string answered at the (single, unconditional) CP2 draft-approval pause that
+    fires after the Writer — default ``""`` (empty = approve, draft unchanged);
+    pass a non-empty markdown string to exercise the edit round-trip.
+
+    We loop: run the runner; when it pauses at a RequestInput, dispatch by
+    interrupt_id (CP1 → the approved plan dict; ``cp3_*`` → the verb reply string;
+    any other UUID id → CP2 → the ``cp2_reply`` string) and resume by
     ``invocation_id``; repeat until a terminal ``event.output`` appears.
     """
     app = _build_app(workflow)
@@ -604,6 +613,7 @@ async def _drive_through_checkpoints(
     message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
 
     cp3_interrupts: list[str] = []
+    cp1_seen = False
     final_output = None
     new_message = message
     invocation_id = None
@@ -625,8 +635,11 @@ async def _drive_through_checkpoints(
                     # ``response_schema=str`` → wrap the free-text reply as
                     # ``{"result": <str>}`` (ADK unwraps it back to the str).
                     pending = (iid, {"result": reply})
-                else:  # CP1
+                elif not cp1_seen:  # CP1 — the FIRST non-cp3_ pause (plan approval)
+                    cp1_seen = True
                     pending = (iid, approved_plan.model_dump(mode="json"))
+                else:  # CP2 — the draft-approval pause after the Writer
+                    pending = (iid, {"result": cp2_reply})
             if event.output is not None:
                 final_output = event.output
 
@@ -860,3 +873,82 @@ async def test_writer_renders_draft_from_ledger():
     # ...and the deterministic render_report sections frame it.
     assert "## Coverage" in draft
     assert "## Sources" in draft
+
+
+# ── T1 (E3.S1): real CP2 RequestInput draft-approval checkpoint ─────────────────
+#
+# CP2 is unconditional (runs on EVERY path that reaches the Writer, NOT deep-gated).
+# After the Writer renders the draft, the workflow pauses at a CP2 ``RequestInput``;
+# the human's reply IS the final draft (empty = approve unchanged, non-empty = the
+# edited markdown). The terminal output stays the ``ClaimLedger`` either way; the
+# (approved/edited) draft is persisted via ``store.save_draft``.
+
+
+async def _build_cp2_workflow(store):
+    """Single-subtopic DEEP-free (NORMAL) workflow that reaches the Writer + CP2 in
+    one pass, fully offline. NORMAL depth keeps CP3 out of the way so the only
+    post-CP1 pause is CP2."""
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    return build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+        store=store,
+    )
+
+
+async def test_cp2_pauses_and_approve_keeps_draft_unchanged():
+    """CP2 fires a RequestInput; an EMPTY reply (approve) leaves the draft
+    unchanged. The terminal ledger is intact and ``store.load_draft()`` equals the
+    Writer-rendered draft (body + deterministic skeleton)."""
+    store = SessionStore.create(RAW_QUERY)
+    workflow = await _build_cp2_workflow(store)
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="d", cp2_reply=""
+    )
+
+    # Terminal output is still the accumulated ledger (CP2 approve is ledger-neutral).
+    assert isinstance(result, ClaimLedger)
+    assert result.kept_count("s1") == 1
+    # NORMAL depth → CP3 never fired; the only post-CP1 pause was CP2.
+    assert _drive_through_checkpoints.last_cp3_interrupts == []
+    # The persisted draft is the unchanged Writer render: body + skeleton sections.
+    draft = store.load_draft()
+    assert draft is not None
+    assert WRITER_BODY in draft
+    assert "## Coverage" in draft
+    assert "## Sources" in draft
+
+
+async def test_cp2_edit_roundtrips_to_persisted_draft():
+    """CP2 edit: a non-empty reply IS the edited markdown — it round-trips verbatim
+    to ``store.load_draft()`` (replacing the Writer render). The terminal ledger is
+    unchanged."""
+    store = SessionStore.create(RAW_QUERY)
+    workflow = await _build_cp2_workflow(store)
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    edited = "# Human-edited report\n\nThis replaces the Writer draft entirely."
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="d", cp2_reply=edited
+    )
+
+    # Ledger unchanged by the edit.
+    assert isinstance(result, ClaimLedger)
+    assert result.kept_count("s1") == 1
+    # The edited markdown round-trips verbatim as the persisted draft.
+    draft = store.load_draft()
+    assert draft == edited
+    # ...and the Writer's original body is NOT the persisted draft (it was replaced).
+    assert WRITER_BODY not in draft
