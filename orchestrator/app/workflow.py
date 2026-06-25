@@ -37,7 +37,7 @@ E3.S2 — see the note on the ``store`` seam below).
 from __future__ import annotations
 
 import json
-from typing import Callable, Optional
+from typing import Optional
 
 from google.adk import Context, Workflow
 from google.adk.events import RequestInput
@@ -53,9 +53,10 @@ from .agents import verifier as verifier_mod
 from .agents.clarifier import build_clarifier, parse_clarify_result
 from .agents.planner import build_planner, parse_plan
 from .agents.writer import build_writer, render_report
+from .cp3_adapter import apply_cp3_verbs
 from .llm import build_model
 from .research_policy import depth_budget, merge_ledger, stop_rule
-from .schemas import ClaimLedger, Depth, ResearchPlan, Subtopic
+from .schemas import ClaimLedger, Depth, ResearchPlan, ScoredURL
 from .session import SessionStore
 
 
@@ -104,6 +105,52 @@ async def _cp1_checkpoint(node_input: ResearchPlan):
     )
 
 
+def _cp3_summary(urls: list[ScoredURL]) -> str:
+    """Human-readable candidate-source list for the CP3 prompt.
+
+    Ports the ``=== Checkpoint 3: Candidate Sources ===`` block from
+    :func:`app.checkpoint.cp3_checkpoint` so the indexed list (the ``[n]`` indices
+    the human references in ``- <n>``) and the verb legend ride on the
+    ``RequestInput(message=...)`` shown by the ADK HITL client.
+    """
+    lines = ["=== Checkpoint 3: Candidate Sources ==="]
+    lines += [
+        f"  [{i}] {u.score:.2f}  {u.etld1 or '?'}  {u.url}"
+        for i, u in enumerate(urls)
+    ]
+    lines.append("[+] add <url> / [-] exclude <n> / [r]edirect <url> / [d]one:")
+    return "\n".join(lines)
+
+
+def _make_cp3_checkpoint(interrupt_id: str):
+    """Build a per-pass CP3 ``RequestInput`` node bound to ``interrupt_id``.
+
+    A factory (not a module-level node like ``_cp1_checkpoint``) because each loop
+    pass needs a **unique** ``interrupt_id`` — ``f"cp3_{subtopic.id}_{iteration}"``
+    — so ADK matches each pass's function-call/response pair correctly across
+    resumes (verified against ADK 2.3.0: ``interrupt_id`` is a direct constructor
+    arg on ``google.adk.events.RequestInput``). The node mirrors
+    ``_cp1_checkpoint``: ``@node(rerun_on_resume=False)`` yields ``RequestInput``
+    to pause; on resume the human's free-text reply becomes the node's output
+    (``response_schema=str``), which the parent feeds to ``apply_cp3_verbs``.
+
+    ``node_input`` is the candidate ``list[ScoredURL]`` (passed by the parent as
+    ``ctx.run_node(cp3, urls)``); the message carries the indexed list + verb
+    legend, the payload carries the URLs themselves.
+    """
+
+    @node(rerun_on_resume=False)
+    async def _cp3_checkpoint(node_input: list[ScoredURL]):
+        yield RequestInput(
+            interrupt_id=interrupt_id,
+            message=_cp3_summary(node_input),
+            payload=node_input,
+            response_schema=str,
+        )
+
+    return _cp3_checkpoint
+
+
 def build_research_workflow(
     *,
     clarifier_node: Optional[BaseNode] = None,
@@ -113,7 +160,6 @@ def build_research_workflow(
     extractor_node: Optional[BaseNode] = None,
     verifier_node: Optional[BaseNode] = None,
     writer_node: Optional[BaseNode] = None,
-    cp3_hook: Optional[Callable[[Subtopic, int], None]] = None,
 ) -> Workflow:
     """Build the research ``Workflow`` (the START→CP1 slice).
 
@@ -154,13 +200,10 @@ def build_research_workflow(
             markdown as a plain ``str`` body, which :func:`render_report` wraps
             with the deterministic coverage/contradictions/sources skeleton.
 
-        cp3_hook: optional CP3 deep-only pass-through (T5). Called once per loop
-            pass — *only* when the approved plan's depth is ``Depth.DEEP`` — as
-            ``cp3_hook(subtopic, iteration)`` at the seam between acquire and
-            extract (mirrors v1 ``next_phase`` MID_ACQUIRE deep-gating). This is a
-            structural placeholder: the real ``RequestInput`` CP3 with the
-            ``+add/-exclude/r/d`` adapter lands in E3.S1. ``None`` (default) = no
-            hook, so shallow/normal runs are unchanged.
+    CP3 (E3.S1 T2) is a real deep-only ``RequestInput`` checkpoint wired
+    in-loop between acquire and extract (see ``_make_cp3_checkpoint`` and the
+    loop body) — not a DI param. It only fires when ``approved.depth ==
+    Depth.DEEP``, so shallow/normal runs are byte-identical to before.
 
     Returns:
         A ``Workflow`` whose single edge runs the ``research`` node from START.
@@ -270,16 +313,33 @@ def build_research_workflow(
                         await ctx.run_node(acquirer, acquire_payload)
                     )
 
-                    # ── T5: CP3 deep-only pass-through hook ───────────────────
-                    # Structural seam between acquire and extract. Gated on
+                    # ── CP3 (E3.S1 T2): real deep-only RequestInput checkpoint ─
+                    # The seam between acquire and extract. Gated on
                     # ``approved.depth == DEEP`` (mirrors v1 ``next_phase``
-                    # MID_ACQUIRE deep-gating); shallow/normal skip it. No
-                    # ``RequestInput`` yet — the real CP3 with the
-                    # ``+add/-exclude/r/d`` adapter is E3.S1. When that lands it
-                    # must use a unique interrupt_id per pass:
-                    # ``f"cp3_{subtopic.id}_{iteration}"``.
-                    if approved.depth == Depth.DEEP and cp3_hook is not None:
-                        cp3_hook(subtopic, iteration)
+                    # MID_ACQUIRE deep-gating); shallow/normal skip it byte-for-
+                    # byte. The CP3 node yields ``RequestInput`` (unique
+                    # interrupt_id ``f"cp3_{subtopic.id}_{iteration}"``) and pauses;
+                    # on resume the human's free-text verb reply comes back as a
+                    # ``str``, which ``apply_cp3_verbs`` turns into
+                    # ``(filtered_urls, needs_supplemental)``.
+                    if approved.depth == Depth.DEEP:
+                        cp3 = _make_cp3_checkpoint(f"cp3_{subtopic.id}_{iteration}")
+                        reply = str(await ctx.run_node(cp3, urls) or "")
+                        urls, needs_supplemental = apply_cp3_verbs(urls, reply)
+
+                        # ── Supplemental re-entry (v2 analog of v1 appending
+                        # ``ResearchPhase.ACQUIRE``): when the user added/redirected
+                        # a URL, re-run the Acquirer ONCE in this same pass to crawl
+                        # the steered targets, merging its candidates with the
+                        # user-filtered list. This extra ``run_node`` is appended to
+                        # the deterministic schedule (always after the CP3 node,
+                        # only when supplemental) so ADK execution-IDs stay aligned
+                        # on resume; the merged list is what feeds extract.
+                        if needs_supplemental:
+                            supplemental = acquirer_mod.parse_scored_urls(
+                                await ctx.run_node(acquirer, acquire_payload)
+                            )
+                            urls = urls + supplemental
 
                     # Extract crawls into ChromaDB; page-ids are discarded (as v1).
                     await ctx.run_node(

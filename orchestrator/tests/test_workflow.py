@@ -248,61 +248,18 @@ def _build_app(workflow) -> App:
 
 
 async def _drive_to_cp1_and_resume(workflow, *, approved_plan: ResearchPlan) -> ClaimLedger:
-    """Drive the slice to the CP1 pause, resume with ``approved_plan``, run the loop.
+    """Drive the slice to the terminal ledger, approving CP1 with ``approved_plan``.
 
-    The CP1 ``_cp1_checkpoint`` node yields ``RequestInput`` and interrupts. We:
-      1. run the runner, draining events until the ``adk_request_input``
-         function-call event appears — capturing its ``interrupt_id`` and the
-         ``invocation_id`` ADK assigned to this run (both ride on that event);
-      2. build the resume reply with ``create_request_input_response`` (a
-         FunctionResponse ``Part`` keyed by ``interrupt_id``, carrying the
-         approved plan as a dict), wrap it in a ``user`` ``Content``;
-      3. run the runner a second time with ``invocation_id=<captured>`` and that
-         reply as ``new_message`` — ADK validates it against the node's
-         ``response_schema`` and feeds it back as the node's output, so the
-         parent ``research`` node finishes and emits the terminal plan.
-
-    The ``research`` node now runs the per-subtopic research loop after CP1, so
-    the terminal output is the accumulated ``ClaimLedger`` (parsed from
-    ``Event.output``, which ADK serializes via ``model_dump()`` — hence the
-    ``model_validate``).
+    Now that CP3 (E3.S1 T2) is a real deep-only ``RequestInput``, a DEEP run pauses
+    at CP1 *and* at each per-pass CP3. This helper delegates to
+    :func:`_drive_through_checkpoints`, which answers CP1 with the approved plan and
+    every CP3 with ``"d"`` (done — no URL edits), so existing CP1/loop tests keep
+    their bodies unchanged: CP3 is a transparent no-op pass-through here. Shallow/
+    normal runs hit no CP3 pause at all (deep-gated), so they are unaffected.
     """
-    app = _build_app(workflow)
-    runner = InMemoryRunner(app=app)
-    session = await runner.session_service.create_session(
-        app_name=app.name, user_id="test-user"
+    return await _drive_through_checkpoints(
+        workflow, approved_plan=approved_plan, cp3_reply="d"
     )
-    message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
-
-    # ── Phase 1: run to the CP1 pause, capturing interrupt_id + invocation_id ──
-    interrupt_id = None
-    invocation_id = None
-    async for event in runner.run_async(
-        user_id="test-user", session_id=session.id, new_message=message
-    ):
-        if has_request_input_function_call(event):
-            interrupt_id = get_request_input_interrupt_ids(event)[0]
-            invocation_id = event.invocation_id
-
-    assert interrupt_id is not None, "workflow did not pause at the CP1 RequestInput"
-    assert invocation_id is not None
-
-    # ── Phase 2: resume with the human-approved plan as a FunctionResponse ──────
-    reply_part = create_request_input_response(
-        interrupt_id, approved_plan.model_dump(mode="json")
-    )
-    reply = types.Content(role="user", parts=[reply_part])
-
-    final_output = None
-    async for event in runner.run_async(
-        user_id="test-user",
-        session_id=session.id,
-        invocation_id=invocation_id,
-        new_message=reply,
-    ):
-        if event.output is not None:
-            final_output = event.output
-    return ClaimLedger.model_validate(final_output)
 
 
 # ── Case (a): slice runs START→CP1→resume(approve)→loop and returns the ledger ──
@@ -544,15 +501,31 @@ async def test_resume_reruns_cp1_only():
     reply = types.Content(role="user", parts=[reply_part])
 
     # ── Phase 2: resume by invocation_id ───────────────────────────────────────
+    # The DEEP plan now pauses at each per-pass CP3 RequestInput after CP1, so we
+    # keep resuming (answering each CP3 with ``"d"`` — no URL edits) until the run
+    # produces its terminal ledger. The same ``invocation_id`` threads all resumes.
     final_output = None
-    async for event in runner.run_async(
-        user_id="test-user",
-        session_id=session.id,
-        invocation_id=invocation_id,
-        new_message=reply,
-    ):
-        if event.output is not None:
-            final_output = event.output
+    new_message = reply
+    for _ in range(100):
+        pending_cp3 = None
+        async for event in runner.run_async(
+            user_id="test-user",
+            session_id=session.id,
+            invocation_id=invocation_id,
+            new_message=new_message,
+        ):
+            if has_request_input_function_call(event):
+                iid = get_request_input_interrupt_ids(event)[0]
+                assert iid.startswith("cp3_"), f"unexpected pause: {iid}"
+                pending_cp3 = iid
+            if event.output is not None:
+                final_output = event.output
+        if pending_cp3 is None:
+            break
+        new_message = types.Content(
+            role="user",
+            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+        )
 
     # ── THE GATE: clarify/plan were auto-checkpoint-skipped on resume ──────────
     # Counters are STILL 1 (not 2): their bodies did NOT re-execute. Only the CP1
@@ -570,27 +543,113 @@ async def test_resume_reruns_cp1_only():
     assert result.kept_count("s2") == 1
 
 
-# ── T5: CP3 deep-only pass-through hook ──────────────────────────────────────────
-def _recording_cp3_hook(calls: list[tuple[str, int]]):
-    """A CP3 hook that records every (subtopic.id, iteration) it is called with."""
+# ── T2 (E3.S1): real deep-only CP3 RequestInput checkpoint ──────────────────────
+#
+# CP3 replaced the old ``cp3_hook`` DI seam with a real ``RequestInput`` node wired
+# in-loop (deep-only). A DEEP run now pauses at CP1, then once per loop pass at
+# ``cp3_{subtopic.id}_{iteration}``. The multi-pause harness below answers CP1 with
+# the approved plan and each CP3 with a scripted free-text verb reply, resuming by
+# ``invocation_id`` until the terminal ledger is produced.
 
-    def _hook(subtopic: Subtopic, iteration: int) -> None:
-        calls.append((subtopic.id, iteration))
 
-    return _hook
+def _counting_acquirer_stub(counter: list[int]) -> object:
+    """Acquirer stub that records each execution (for the supplemental re-entry
+    proof) and returns one ScoredURL — same shape as ``_acquirer_stub``."""
+
+    @node
+    async def _stub(node_input: str) -> list[ScoredURL]:
+        counter.append(1)
+        return [
+            ScoredURL(
+                url="https://a.example/doc",
+                score=0.9,
+                strategy=CrawlStrategy.CRAWL,
+                etld1="a.example",
+            )
+        ]
+
+    return _stub
 
 
-async def test_cp3_hook_called_per_pass_on_deep_plan():
-    """Deep plan → the CP3 hook is visited once per loop pass (per subtopic+iter).
+def _recording_extractor_stub(seen_urls: list[list[str]]) -> object:
+    """Extractor stub that records the URL list it received each pass (so a test
+    can assert a user-added URL reached extract). Decodes the JSON node_input."""
+    import json as _json
+
+    @node
+    async def _stub(node_input: str) -> list[str]:
+        payload = _json.loads(node_input)
+        seen_urls.append([u["url"] for u in payload])
+        return ["page-1"]
+
+    return _stub
+
+
+async def _drive_through_checkpoints(
+    workflow, *, approved_plan: ResearchPlan, cp3_reply
+) -> ClaimLedger:
+    """Drive a run through CP1 + every per-pass CP3 RequestInput to the terminal ledger.
+
+    ``cp3_reply`` is either a fixed reply string applied to every CP3 pause, or a
+    callable ``(interrupt_id) -> str`` for per-pass scripting. We loop: run the
+    runner; when it pauses at a RequestInput, dispatch by interrupt_id (CP1 → the
+    approved plan dict; ``cp3_*`` → the verb reply string) and resume by
+    ``invocation_id``; repeat until a terminal ``event.output`` appears.
+    """
+    app = _build_app(workflow)
+    runner = InMemoryRunner(app=app)
+    session = await runner.session_service.create_session(
+        app_name=app.name, user_id="test-user"
+    )
+    message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
+
+    cp3_interrupts: list[str] = []
+    final_output = None
+    new_message = message
+    invocation_id = None
+
+    for _ in range(200):  # generous cap; real runs need far fewer hops
+        pending = None  # (interrupt_id, reply_payload)
+        async for event in runner.run_async(
+            user_id="test-user",
+            session_id=session.id,
+            invocation_id=invocation_id,
+            new_message=new_message,
+        ):
+            if has_request_input_function_call(event):
+                iid = get_request_input_interrupt_ids(event)[0]
+                invocation_id = event.invocation_id
+                if iid.startswith("cp3_"):
+                    cp3_interrupts.append(iid)
+                    reply = cp3_reply(iid) if callable(cp3_reply) else cp3_reply
+                    # ``response_schema=str`` → wrap the free-text reply as
+                    # ``{"result": <str>}`` (ADK unwraps it back to the str).
+                    pending = (iid, {"result": reply})
+                else:  # CP1
+                    pending = (iid, approved_plan.model_dump(mode="json"))
+            if event.output is not None:
+                final_output = event.output
+
+        if pending is None:
+            break  # run reached a terminal output, no further pause
+        reply_part = create_request_input_response(pending[0], pending[1])
+        new_message = types.Content(role="user", parts=[reply_part])
+
+    assert final_output is not None, "workflow never produced a terminal output"
+    # Stash the CP3 interrupt trace on the returned ledger's validation for asserts.
+    ledger = ClaimLedger.model_validate(final_output)
+    _drive_through_checkpoints.last_cp3_interrupts = cp3_interrupts  # type: ignore[attr-defined]
+    return ledger
+
+
+async def test_cp3_pauses_once_per_pass_on_deep_plan():
+    """Deep plan → CP3 ``RequestInput`` fires once per loop pass with the
+    unique per-pass interrupt_id ``cp3_{subtopic.id}_{iteration}``.
 
     One DEEP subtopic with a high target: the verifier adds 2 fresh
     UNCORROBORATED claims each pass (never KEPT, never diminishing), so only the
-    DEEP budget stops the loop and it runs the full ``MAX_ITER_DEEP`` passes. The
-    hook must fire once per pass, in order, with the matching (subtopic.id, iter).
-    """
-    calls: list[tuple[str, int]] = []
-    # Each pass adds 2 NEW claims (no diminishing) and never KEPT (no target-met),
-    # so only the DEEP budget stops the loop → exactly ``MAX_ITER_DEEP`` passes.
+    DEEP budget stops the loop → exactly ``MAX_ITER_DEEP`` passes, each pausing
+    at CP3. Each CP3 reply is ``d`` (done, no edits)."""
     budget = config.MAX_ITER_DEEP
     passes = [
         ClaimLedger(
@@ -609,21 +668,22 @@ async def test_cp3_hook_called_per_pass_on_deep_plan():
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
         writer_node=_writer_stub(),
-        cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
         subtopics=[Subtopic(id="s1", question="only angle", target_evidence=99)],
         depth=Depth.DEEP,
     )
-    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+    await _drive_through_checkpoints(workflow, approved_plan=approve_plan, cp3_reply="d")
 
-    # The hook fired once per pass, in iteration order, all for subtopic s1.
-    assert calls == [("s1", i) for i in range(budget)]
+    # CP3 paused once per pass, in order, with the matching per-pass interrupt_id.
+    assert _drive_through_checkpoints.last_cp3_interrupts == [
+        f"cp3_s1_{i}" for i in range(budget)
+    ]
 
 
-async def test_cp3_hook_skipped_on_shallow_plan():
-    """Shallow plan → the CP3 hook is NEVER visited (deep-gated no-op)."""
-    calls: list[tuple[str, int]] = []
+async def test_cp3_skipped_on_shallow_plan():
+    """Shallow plan → CP3 ``RequestInput`` NEVER fires (deep-gated). The run
+    reaches the terminal ledger via CP1 alone (no CP3 pause)."""
     verifier = _verifier_stub_from_passes(
         [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
     )
@@ -634,20 +694,20 @@ async def test_cp3_hook_skipped_on_shallow_plan():
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
         writer_node=_writer_stub(),
-        cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
         subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
         depth=Depth.SHALLOW,
     )
-    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="d"
+    )
+    assert _drive_through_checkpoints.last_cp3_interrupts == [], "CP3 fired on SHALLOW"
+    assert result.kept_count("s1") == 1
 
-    assert calls == [], f"CP3 hook fired on a SHALLOW plan: {calls}"
 
-
-async def test_cp3_hook_skipped_on_normal_plan():
-    """Normal plan → the CP3 hook is NEVER visited (deep-gated no-op)."""
-    calls: list[tuple[str, int]] = []
+async def test_cp3_skipped_on_normal_plan():
+    """Normal plan → CP3 ``RequestInput`` NEVER fires (deep-gated)."""
     verifier = _verifier_stub_from_passes(
         [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
     )
@@ -658,15 +718,105 @@ async def test_cp3_hook_skipped_on_normal_plan():
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
         writer_node=_writer_stub(),
-        cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
         subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
         depth=Depth.NORMAL,
     )
-    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="d"
+    )
+    assert _drive_through_checkpoints.last_cp3_interrupts == [], "CP3 fired on NORMAL"
+    assert result.kept_count("s1") == 1
 
-    assert calls == [], f"CP3 hook fired on a NORMAL plan: {calls}"
+
+async def test_cp3_exclude_by_index_filters_url_before_extract():
+    """CP3 ``- 0`` excludes the acquirer's only URL → extract sees an empty list
+    that pass; no supplemental re-entry (exclude does not set supplemental)."""
+    seen_urls: list[list[str]] = []
+    acquirer_calls: list[int] = []
+    # Single DEEP pass: target met after one pass (one KEPT claim).
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.DEEP),
+        acquirer_node=_counting_acquirer_stub(acquirer_calls),
+        extractor_node=_recording_extractor_stub(seen_urls),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.DEEP,
+    )
+    await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="- 0\nd"
+    )
+    # The single URL was excluded → extract saw an empty list; acquirer ran ONCE
+    # (no supplemental re-entry on exclude).
+    assert seen_urls == [[]]
+    assert acquirer_calls == [1]
+
+
+async def test_cp3_add_triggers_supplemental_acquirer_reentry():
+    """CP3 ``+ <url>`` sets supplemental → the acquirer is re-run ONCE in the same
+    pass and the user-added URL reaches extract alongside the re-acquired URL."""
+    seen_urls: list[list[str]] = []
+    acquirer_calls: list[int] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.DEEP),
+        acquirer_node=_counting_acquirer_stub(acquirer_calls),
+        extractor_node=_recording_extractor_stub(seen_urls),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.DEEP,
+    )
+    await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="+ https://user-added\nd"
+    )
+    # Acquirer ran TWICE this pass: initial acquire + one supplemental re-entry.
+    assert acquirer_calls == [1, 1]
+    # Extract saw the user-added URL (supplemental re-entry merged it in).
+    assert len(seen_urls) == 1
+    assert "https://user-added" in seen_urls[0]
+    # ...alongside the re-acquired candidate.
+    assert "https://a.example/doc" in seen_urls[0]
+
+
+async def test_cp3_redirect_triggers_supplemental_acquirer_reentry():
+    """CP3 ``r <url>`` (redirect) also sets supplemental → acquirer re-runs once
+    and the steered URL reaches extract."""
+    seen_urls: list[list[str]] = []
+    acquirer_calls: list[int] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.DEEP),
+        acquirer_node=_counting_acquirer_stub(acquirer_calls),
+        extractor_node=_recording_extractor_stub(seen_urls),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.DEEP,
+    )
+    await _drive_through_checkpoints(
+        workflow, approved_plan=approve_plan, cp3_reply="r https://redir\nd"
+    )
+    assert acquirer_calls == [1, 1]
+    assert "https://redir" in seen_urls[0]
 
 
 # ── T0 gate: the workflow renders a markdown draft from the ledger (CP2 input) ───

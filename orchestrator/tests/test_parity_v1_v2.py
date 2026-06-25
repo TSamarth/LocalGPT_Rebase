@@ -25,10 +25,10 @@ How identical inputs are guaranteed (the parity crux):
     ``stop_rule`` / ``depth_budget`` (T1), so dedup-by-id and the three stop-rule
     exits behave identically given identical per-pass claim sets.
 
-Coverage: a SHALLOW case (no CP3) and a DEEP case (CP3 visited). In v1 the deep
-CP3 console gate is answered ``d`` (done, no edits) so it does not perturb the URL
-list; in v2 the default ``cp3_hook=None`` is a no-op — both leave the ledger
-unchanged, keeping parity honest.
+Coverage: a SHALLOW case (no CP3) and a DEEP case (CP3 visited). Both stacks answer
+the deep CP3 gate with ``d`` (done, no edits): v1's console gate and v2's real
+``RequestInput`` CP3 node each leave the URL list untouched, so neither perturbs the
+ledger — keeping parity honest.
 
 Also here: a resume-mid-loop test that extends the E2.S1 resume gate INTO the loop
 (Test strategy line 154) — proving completed loop passes are checkpoint-skipped on
@@ -275,16 +275,33 @@ async def _run_v2(plan_dict: dict, passes: list[dict]) -> ClaimLedger:
             invocation_id = event.invocation_id
     assert interrupt_id is not None and invocation_id is not None
 
-    # Approve the SAME plan dict at CP1 (human-approved = planner output, unchanged).
-    reply_part = create_request_input_response(interrupt_id, plan_dict)
-    reply = types.Content(role="user", parts=[reply_part])
+    # Approve the SAME plan dict at CP1 (human-approved = planner output, unchanged),
+    # then answer each per-pass CP3 RequestInput (DEEP plans only) with ``"d"`` (done,
+    # no edits) — mirroring the v1 console CP3 answered ``d``, so neither stack
+    # perturbs the URL list and the ledgers stay identical.
+    new_message = types.Content(
+        role="user",
+        parts=[create_request_input_response(interrupt_id, plan_dict)],
+    )
     final_output = None
-    async for event in runner.run_async(
-        user_id="test-user", session_id=session.id,
-        invocation_id=invocation_id, new_message=reply,
-    ):
-        if event.output is not None:
-            final_output = event.output
+    for _ in range(100):
+        pending_cp3 = None
+        async for event in runner.run_async(
+            user_id="test-user", session_id=session.id,
+            invocation_id=invocation_id, new_message=new_message,
+        ):
+            if has_request_input_function_call(event):
+                iid = get_request_input_interrupt_ids(event)[0]
+                assert iid.startswith("cp3_"), f"unexpected pause after CP1: {iid}"
+                pending_cp3 = iid
+            if event.output is not None:
+                final_output = event.output
+        if pending_cp3 is None:
+            break
+        new_message = types.Content(
+            role="user",
+            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+        )
     return ClaimLedger.model_validate(final_output)
 
 
@@ -332,9 +349,9 @@ def test_parity_shallow_target_met(monkeypatch):
 def test_parity_deep_budget_hit(monkeypatch):
     """DEEP plan, one subtopic. Claims stay UNCORROBORATED (never target-met) and
     every pass adds 2 fresh claims (never diminishing), so only the DEEP budget
-    (config.MAX_ITER_DEEP) stops the loop. The deep CP3 hook is visited each pass in
-    v2 (no-op) and the CP3 console gate fires each pass in v1 (answered ``d``,
-    no edits). v1 ledger == v2 ledger."""
+    (config.MAX_ITER_DEEP) stops the loop. The deep CP3 RequestInput fires each pass
+    in v2 (answered ``d``, no edits) and the CP3 console gate fires each pass in v1
+    (answered ``d``, no edits). v1 ledger == v2 ledger."""
     budget = config.MAX_ITER_DEEP
     plan = _plan_dict(["s1"], "deep")
     passes = [
@@ -466,16 +483,32 @@ async def test_resume_mid_loop_skips_completed_passes():
     assert interrupt_id is not None and invocation_id is not None
     assert call_log == [], "verifier ran before CP1 resume — loop started too early"
 
-    # ── Phase 2: resume by invocation_id; the loop now runs to completion. ──
-    reply_part = create_request_input_response(interrupt_id, plan)
-    reply = types.Content(role="user", parts=[reply_part])
+    # ── Phase 2: resume by invocation_id; the loop now runs to completion. The
+    # DEEP plan pauses at each per-pass CP3 RequestInput — answer ``"d"`` (no edits)
+    # and keep resuming until the terminal ledger. CP3 is between acquire and verify,
+    # so it does not perturb the verifier call count. ──
+    new_message = types.Content(
+        role="user", parts=[create_request_input_response(interrupt_id, plan)]
+    )
     final_output = None
-    async for event in runner.run_async(
-        user_id="test-user", session_id=session.id,
-        invocation_id=invocation_id, new_message=reply,
-    ):
-        if event.output is not None:
-            final_output = event.output
+    for _ in range(100):
+        pending_cp3 = None
+        async for event in runner.run_async(
+            user_id="test-user", session_id=session.id,
+            invocation_id=invocation_id, new_message=new_message,
+        ):
+            if has_request_input_function_call(event):
+                iid = get_request_input_interrupt_ids(event)[0]
+                assert iid.startswith("cp3_"), f"unexpected pause: {iid}"
+                pending_cp3 = iid
+            if event.output is not None:
+                final_output = event.output
+        if pending_cp3 is None:
+            break
+        new_message = types.Content(
+            role="user",
+            parts=[create_request_input_response(pending_cp3, {"result": "d"})],
+        )
 
     # ── THE GATE: each pass ran exactly once across the kill/resume boundary. ──
     # One pass per subtopic × two subtopics = 2 verifier body executions, with NO
