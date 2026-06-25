@@ -54,7 +54,6 @@ from app.schemas import (
     SourceRef,
     Subtopic,
 )
-from app.session import SessionStore
 from app.session_exporter import SessionExporterPlugin
 from app.workflow import build_research_workflow
 
@@ -185,7 +184,7 @@ def _writer_stub():
 # ── App + runner builders ──────────────────────────────────────────────────────
 
 
-def _build_offline_workflow(*, store=None):
+def _build_offline_workflow():
     return build_research_workflow(
         clarifier_node=_clarifier_stub(),
         planner_node=_planner_stub(),
@@ -193,7 +192,6 @@ def _build_offline_workflow(*, store=None):
         extractor_node=_extractor_stub(),
         verifier_node=_verifier_stub_one_kept(),
         writer_node=_writer_stub(),
-        store=store,
     )
 
 
@@ -349,28 +347,23 @@ async def test_exporter_incremental_writes(tmp_path):
 
 
 async def test_exporter_byte_comparability(tmp_path):
-    """Exporter files are byte-identical to SessionStore files on canned inputs.
+    """Exporter files match expected content derived from canned inputs.
 
-    Run with BOTH exporter plugin (via ``build_runner``) AND ``store=`` write-
-    through active simultaneously.  After terminal output compare:
-      exporter plan.json   == store.load_plan().model_dump_json(indent=2)
-      exporter ledger.json == store.load_ledger().model_dump_json(indent=2)
-      exporter draft.md    == store.load_draft()
+    After a complete run through all checkpoints (CP1 approve → research loop →
+    CP2 approve), the exporter must write:
+      plan.json         — byte-identical to _APPROVE_PLAN.model_dump_json(indent=2)
+                          (SHALLOW, target_evidence=2 left unchanged by parse_plan)
+      claim_ledger.json — one KEPT claim "c1" from the canned verifier stub
+      draft.md          — contains the writer stub body
 
-    Byte-comparability holds because:
-    - plan: ``store.save_plan(plan)`` and exporter both call parse_plan on the
-      same plan content (SHALLOW, target_evidence=2 unchanged by apply_depth_targets)
-      → identical JSON.
-    - ledger: ``store.save_ledger(ledger)`` at end of loop and exporter's last
-      v2_ledger event carry the same accumulated ledger.
-    - draft: ``store.save_draft(approved_draft)`` and v2_draft event carry the
-      same ``approved_draft`` string.
+    The write-through seam (store=) was removed in E3.S2 T3; we now derive the
+    expected values directly from the known canned inputs instead of comparing
+    against SessionStore output.
     """
     exporter_sessions = tmp_path / "exporter_sessions"
     exporter = SessionExporterPlugin(sessions_dir=str(exporter_sessions))
 
-    store = SessionStore.create(RAW_QUERY)
-    workflow = _build_offline_workflow(store=store)  # both active
+    workflow = _build_offline_workflow()
     app = _build_app(workflow)
     session_svc = InMemorySessionService()
     runner = build_runner(app, session_service=session_svc, plugins=[exporter])
@@ -381,27 +374,26 @@ async def test_exporter_byte_comparability(tmp_path):
 
     session_dir = exporter_sessions / session.id
 
-    # plan.json: byte-identical to store.load_plan().model_dump_json(indent=2)
-    store_plan = store.load_plan()
-    assert store_plan is not None, "store must have plan.json after run"
+    # plan.json: _APPROVE_PLAN is SHALLOW with target_evidence=2 which
+    # apply_depth_targets leaves unchanged → parse_plan is idempotent on it.
     exporter_plan_text = (session_dir / "plan.json").read_text(encoding="utf-8")
-    assert exporter_plan_text == store_plan.model_dump_json(indent=2), (
-        "plan.json content mismatch between exporter and SessionStore"
+    assert exporter_plan_text == _APPROVE_PLAN.model_dump_json(indent=2), (
+        "plan.json content mismatch"
     )
 
-    # claim_ledger.json: byte-identical to store.load_ledger().model_dump_json(indent=2)
-    store_ledger = store.load_ledger()
+    # claim_ledger.json: one KEPT claim from the canned verifier stub.
+    # The verifier returns a claim with 2 distinct-etld1 sources; enrich_ledger
+    # recomputes status to KEPT.
     exporter_ledger_text = (session_dir / "claim_ledger.json").read_text(encoding="utf-8")
-    assert exporter_ledger_text == store_ledger.model_dump_json(indent=2), (
-        "claim_ledger.json content mismatch between exporter and SessionStore"
-    )
+    ledger = ClaimLedger.model_validate_json(exporter_ledger_text)
+    assert len(ledger.claims) == 1, "expected exactly one claim in the ledger"
+    assert ledger.claims[0].id == "c1"
+    assert ledger.claims[0].status == ClaimStatus.KEPT
 
-    # draft.md: byte-identical to store.load_draft()
-    store_draft = store.load_draft()
-    assert store_draft is not None, "store must have draft.md after run"
+    # draft.md: render_report wraps the writer stub body with deterministic sections.
     exporter_draft = (session_dir / "draft.md").read_text(encoding="utf-8")
-    assert exporter_draft == store_draft, (
-        "draft.md content mismatch between exporter and SessionStore"
+    assert "## Findings\n\nWriter body." in exporter_draft, (
+        "draft.md missing writer stub body"
     )
 
 

@@ -43,7 +43,6 @@ from app.schemas import (
     SourceRef,
     Subtopic,
 )
-from app.session import SessionStore
 from app.workflow import CHECKPOINT_REJECT, build_research_workflow
 
 RAW_QUERY = "  tell me about rust async runtimes  "
@@ -175,7 +174,7 @@ def _verifier_stub_from_passes(pass_ledgers: list[ClaimLedger]) -> object:
     return _stub
 
 
-def _build_loop_workflow(*, planner_node, verifier_node, store=None):
+def _build_loop_workflow(*, planner_node, verifier_node):
     """Build a fully-offline workflow with all five nodes injected (canned)."""
     return build_research_workflow(
         clarifier_node=_clarifier_stub(),
@@ -184,7 +183,6 @@ def _build_loop_workflow(*, planner_node, verifier_node, store=None):
         extractor_node=_extractor_stub(),
         verifier_node=verifier_node,
         writer_node=_writer_stub(),
-        store=store,
     )
 
 
@@ -311,35 +309,6 @@ async def test_cp1_edited_plan_drives_loop():
     assert {c.id for c in result.claims} == {"c1"}
     assert result.claims[0].subtopic_id == "s1"
     assert result.kept_count("s1") == 1
-
-
-# ── T6: SessionStore write-through lands ledger.json during the run ──────────────
-async def test_store_write_through_persists_ledger():
-    store = SessionStore.create(RAW_QUERY)
-    verifier = _verifier_stub_from_passes(
-        [
-            ClaimLedger(claims=[_kept_claim("c1", "s1")]),
-            ClaimLedger(claims=[_kept_claim("c2", "s2")]),
-        ]
-    )
-    workflow = _build_loop_workflow(
-        planner_node=_planner_stub(), verifier_node=verifier, store=store
-    )
-    approve_plan = ResearchPlan(
-        subtopics=[
-            Subtopic(id="s1", question="angle 1", target_evidence=1),
-            Subtopic(id="s2", question="angle 2", target_evidence=1),
-        ],
-        depth=Depth.DEEP,
-    )
-    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
-
-    ledger_path = store.dir / SessionStore.LEDGER_FILE
-    assert ledger_path.exists(), "T6 write-through did not persist ledger.json"
-    persisted = store.load_ledger()
-    assert isinstance(persisted, ClaimLedger)
-    # The persisted ledger is the loop's accumulated product.
-    assert {c.id for c in persisted.claims} == {"c1", "c2"}
 
 
 # ── T2 gate: each of the 3 stop-rule exits fires (target / diminishing / budget) ─
@@ -613,6 +582,7 @@ async def _drive_through_checkpoints(
     message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
 
     cp3_interrupts: list[str] = []
+    session_state: dict = {}
     cp1_seen = False
     final_output = None
     new_message = message
@@ -626,6 +596,9 @@ async def _drive_through_checkpoints(
             invocation_id=invocation_id,
             new_message=new_message,
         ):
+            # Accumulate state_delta so tests can inspect v2_plan/v2_ledger/v2_draft.
+            if event.actions and event.actions.state_delta:
+                session_state.update(event.actions.state_delta)
             if has_request_input_function_call(event):
                 iid = get_request_input_interrupt_ids(event)[0]
                 invocation_id = event.invocation_id
@@ -649,9 +622,10 @@ async def _drive_through_checkpoints(
         new_message = types.Content(role="user", parts=[reply_part])
 
     assert final_output is not None, "workflow never produced a terminal output"
-    # Stash the CP3 interrupt trace on the returned ledger's validation for asserts.
+    # Stash the CP3 interrupt trace and accumulated session state for asserts.
     ledger = ClaimLedger.model_validate(final_output)
     _drive_through_checkpoints.last_cp3_interrupts = cp3_interrupts  # type: ignore[attr-defined]
+    _drive_through_checkpoints.last_session_state = session_state  # type: ignore[attr-defined]
     return ledger
 
 
@@ -835,13 +809,15 @@ async def test_cp3_redirect_triggers_supplemental_acquirer_reentry():
 # ── T0 gate: the workflow renders a markdown draft from the ledger (CP2 input) ───
 async def test_writer_renders_draft_from_ledger():
     """After the loop, the Writer node + ``render_report`` produce a markdown draft
-    persisted as ``draft.md`` — the artifact CP2 (T1) will consume.
+    emitted as ``v2_draft`` in ADK session state — the artifact CP2 (T1) consumes.
 
     The injected canned writer returns a known body; the deterministic skeleton
     (Coverage / Sources sections from ``render_report``) is added on top. The draft
     must contain BOTH the writer's body AND the deterministic sections.
+
+    The draft is accessed via ``_drive_through_checkpoints.last_session_state``
+    (state_delta accumulation) instead of SessionStore, which was removed in E3.S2 T3.
     """
-    store = SessionStore.create(RAW_QUERY)
     verifier = _verifier_stub_from_passes(
         [
             ClaimLedger(claims=[_kept_claim("c1", "s1")]),
@@ -855,7 +831,6 @@ async def test_writer_renders_draft_from_ledger():
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
         writer_node=_writer_stub(),
-        store=store,
     )
     approve_plan = ResearchPlan(
         subtopics=[
@@ -866,8 +841,8 @@ async def test_writer_renders_draft_from_ledger():
     )
     await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
 
-    draft = store.load_draft()
-    assert draft is not None, "T0: writer draft was not persisted as draft.md"
+    draft = _drive_through_checkpoints.last_session_state.get("v2_draft")
+    assert draft is not None, "T0: writer draft was not emitted as v2_draft"
     # The Writer's body prose is present...
     assert WRITER_BODY in draft
     # ...and the deterministic render_report sections frame it.
@@ -884,7 +859,7 @@ async def test_writer_renders_draft_from_ledger():
 # (approved/edited) draft is persisted via ``store.save_draft``.
 
 
-async def _build_cp2_workflow(store):
+async def _build_cp2_workflow():
     """Single-subtopic DEEP-free (NORMAL) workflow that reaches the Writer + CP2 in
     one pass, fully offline. NORMAL depth keeps CP3 out of the way so the only
     post-CP1 pause is CP2."""
@@ -898,16 +873,18 @@ async def _build_cp2_workflow(store):
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
         writer_node=_writer_stub(),
-        store=store,
     )
 
 
 async def test_cp2_pauses_and_approve_keeps_draft_unchanged():
     """CP2 fires a RequestInput; an EMPTY reply (approve) leaves the draft
-    unchanged. The terminal ledger is intact and ``store.load_draft()`` equals the
-    Writer-rendered draft (body + deterministic skeleton)."""
-    store = SessionStore.create(RAW_QUERY)
-    workflow = await _build_cp2_workflow(store)
+    unchanged. The terminal ledger is intact and the approved draft (emitted as
+    ``v2_draft`` in session state) equals the Writer-rendered draft (body + skeleton).
+
+    Draft accessed via ``_drive_through_checkpoints.last_session_state`` instead of
+    SessionStore, which was removed in E3.S2 T3.
+    """
+    workflow = await _build_cp2_workflow()
     approve_plan = ResearchPlan(
         subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
         depth=Depth.NORMAL,
@@ -921,8 +898,8 @@ async def test_cp2_pauses_and_approve_keeps_draft_unchanged():
     assert result.kept_count("s1") == 1
     # NORMAL depth → CP3 never fired; the only post-CP1 pause was CP2.
     assert _drive_through_checkpoints.last_cp3_interrupts == []
-    # The persisted draft is the unchanged Writer render: body + skeleton sections.
-    draft = store.load_draft()
+    # The approved draft is the unchanged Writer render: body + skeleton sections.
+    draft = _drive_through_checkpoints.last_session_state.get("v2_draft")
     assert draft is not None
     assert WRITER_BODY in draft
     assert "## Coverage" in draft
@@ -931,10 +908,13 @@ async def test_cp2_pauses_and_approve_keeps_draft_unchanged():
 
 async def test_cp2_edit_roundtrips_to_persisted_draft():
     """CP2 edit: a non-empty reply IS the edited markdown — it round-trips verbatim
-    to ``store.load_draft()`` (replacing the Writer render). The terminal ledger is
-    unchanged."""
-    store = SessionStore.create(RAW_QUERY)
-    workflow = await _build_cp2_workflow(store)
+    as ``v2_draft`` in session state (replacing the Writer render). The terminal
+    ledger is unchanged.
+
+    Draft accessed via ``_drive_through_checkpoints.last_session_state`` instead of
+    SessionStore, which was removed in E3.S2 T3.
+    """
+    workflow = await _build_cp2_workflow()
     approve_plan = ResearchPlan(
         subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
         depth=Depth.NORMAL,
@@ -947,10 +927,10 @@ async def test_cp2_edit_roundtrips_to_persisted_draft():
     # Ledger unchanged by the edit.
     assert isinstance(result, ClaimLedger)
     assert result.kept_count("s1") == 1
-    # The edited markdown round-trips verbatim as the persisted draft.
-    draft = store.load_draft()
+    # The edited markdown round-trips verbatim as the emitted v2_draft.
+    draft = _drive_through_checkpoints.last_session_state.get("v2_draft")
     assert draft == edited
-    # ...and the Writer's original body is NOT the persisted draft (it was replaced).
+    # ...and the Writer's original body is NOT the approved draft (it was replaced).
     assert WRITER_BODY not in draft
 
 
