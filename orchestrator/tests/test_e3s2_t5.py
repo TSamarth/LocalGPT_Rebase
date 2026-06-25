@@ -292,9 +292,12 @@ async def test_authoritative_resume_with_exporter(tmp_path):
         "plan.json fails byte-comparable roundtrip through ResearchPlan"
     )
 
-    # claim_ledger.json: parse and assert ≥ 1 claim.
+    # claim_ledger.json: roundtrip through ClaimLedger must be idempotent.
     parsed_ledger = ClaimLedger.model_validate_json(ledger_text)
     assert len(parsed_ledger.claims) >= 1, "claim_ledger.json has no claims"
+    assert parsed_ledger.model_dump_json(indent=2) == ledger_text, (
+        "claim_ledger.json fails byte-comparable roundtrip through ClaimLedger"
+    )
 
     # draft.md: must contain the writer stub body.
     assert "## Findings" in draft_text, "draft.md missing '## Findings'"
@@ -363,6 +366,9 @@ async def test_exporter_byte_comparable_to_session_store(tmp_path):
 
     # Read exporter output.
     exporter_session_dir = exporter_sessions / session.id
+    assert (exporter_session_dir / "plan.json").exists(), "exporter did not write plan.json"
+    assert (exporter_session_dir / "claim_ledger.json").exists(), "exporter did not write claim_ledger.json"
+    assert (exporter_session_dir / "draft.md").exists(), "exporter did not write draft.md"
     plan_text = (exporter_session_dir / "plan.json").read_text(encoding="utf-8")
     ledger_text = (exporter_session_dir / "claim_ledger.json").read_text(encoding="utf-8")
     draft_text = (exporter_session_dir / "draft.md").read_text(encoding="utf-8")
