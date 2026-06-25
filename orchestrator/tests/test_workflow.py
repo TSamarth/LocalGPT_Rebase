@@ -44,7 +44,7 @@ from app.schemas import (
     Subtopic,
 )
 from app.session import SessionStore
-from app.workflow import build_research_workflow
+from app.workflow import CHECKPOINT_REJECT, build_research_workflow
 
 RAW_QUERY = "  tell me about rust async runtimes  "
 
@@ -952,3 +952,240 @@ async def test_cp2_edit_roundtrips_to_persisted_draft():
     assert draft == edited
     # ...and the Writer's original body is NOT the persisted draft (it was replaced).
     assert WRITER_BODY not in draft
+
+
+# ── T3 (E3.S1): reject = resumable abort at the rejecting checkpoint ─────────────
+#
+# A reject reply (the reserved ``CHECKPOINT_REJECT`` sentinel) does NOT crash or
+# discard the run: the parent re-issues a FRESH ``RequestInput`` pause at the SAME
+# logical checkpoint (new node instance → new run_id/interrupt_id), so the run
+# halts there and is resumable by ``invocation_id``. Resuming re-enters that
+# checkpoint. This is the ADK-2.3.0-correct analog of v1's ``CheckpointRejected``
+# (raised → caught → session left at its last stage, resumable). The mechanism was
+# verified against installed ADK 2.3.0: a node that *raises* is recorded
+# ``NodeStatus.FAILED`` (terminal, NOT resumable); the ONLY resumable-pause outcome
+# is a node that yields a ``RequestInput`` (``NodeStatus.WAITING``). So reject is a
+# re-yielded ``RequestInput``, the "rejection/retry cycle" the ADK
+# ``RequestInput.interrupt_id`` docstring sanctions.
+#
+# CP1 reject rides as a schema-valid empty-``subtopics`` plan (ADK validates the
+# CP1 resume reply against ``response_schema=ResearchPlan`` first, so a free-form
+# sentinel mapping can't be used); CP2/CP3 reject ride as the bare sentinel string
+# ``CHECKPOINT_REJECT`` (their schema is ``str``).
+
+
+async def _drive_scripted(workflow, *, cp1_replies, cp2_replies, cp3_reply="d"):
+    """Drive a run, scripting a LIST of replies per checkpoint kind.
+
+    ``cp1_replies`` / ``cp2_replies`` are popped in order at each CP1 / CP2 pause —
+    so a reject sentinel followed by a real reply exercises the reject→re-pause→
+    approve cycle. Every CP3 pause gets ``cp3_reply``. Returns
+    ``(ledger, pause_log)`` where ``pause_log`` is the ordered list of
+    ``("cp1"|"cp2"|"cp3", interrupt_id)`` tuples seen — so a test can assert the
+    rejecting checkpoint paused AGAIN (a fresh interrupt_id) before completing.
+    """
+    cp1_q = list(cp1_replies)
+    cp2_q = list(cp2_replies)
+    app = _build_app(workflow)
+    runner = InMemoryRunner(app=app)
+    session = await runner.session_service.create_session(
+        app_name=app.name, user_id="test-user"
+    )
+    message = types.Content(role="user", parts=[types.Part(text=RAW_QUERY)])
+
+    pause_log: list[tuple[str, str]] = []
+    final_output = None
+    new_message = message
+    invocation_id = None
+
+    # CP1 precedes CP2; classify a non-cp3 pause as CP1 while ``cp1_q`` still has
+    # scripted replies, else CP2. A reject reply is re-queued implicitly by the
+    # workflow re-pausing — the queue simply holds [reject..., real_reply].
+    for _ in range(200):
+        pending = None  # (interrupt_id, reply_payload)
+        async for event in runner.run_async(
+            user_id="test-user",
+            session_id=session.id,
+            invocation_id=invocation_id,
+            new_message=new_message,
+        ):
+            if has_request_input_function_call(event):
+                iid = get_request_input_interrupt_ids(event)[0]
+                invocation_id = event.invocation_id
+                if iid.startswith("cp3_"):
+                    pause_log.append(("cp3", iid))
+                    pending = (iid, {"result": cp3_reply})
+                elif cp1_q:  # CP1 — scripted plan replies (reject sentinel or plan)
+                    reply = cp1_q.pop(0)
+                    pause_log.append(("cp1", iid))
+                    if reply == CHECKPOINT_REJECT:
+                        # CP1 reject MUST satisfy response_schema=ResearchPlan, so
+                        # the reject signal is a schema-valid empty-subtopics plan
+                        # (see app.workflow._is_cp1_reject).
+                        pending = (iid, {"subtopics": []})
+                    else:
+                        pending = (iid, reply)
+                else:  # CP2 — scripted str replies (reject sentinel or markdown)
+                    reply = cp2_q.pop(0) if cp2_q else ""
+                    pause_log.append(("cp2", iid))
+                    pending = (iid, {"result": reply})
+            if event.output is not None:
+                final_output = event.output
+
+        if pending is None:
+            break
+        new_message = types.Content(
+            role="user",
+            parts=[create_request_input_response(pending[0], pending[1])],
+        )
+
+    assert final_output is not None, "workflow never produced a terminal output"
+    return ClaimLedger.model_validate(final_output), pause_log
+
+
+def _single_deep_subtopic_workflow(verifier):
+    """A 1-subtopic DEEP workflow reaching CP1 → (per-pass CP3) → Writer → CP2."""
+    return build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.DEEP),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+
+
+async def test_cp1_reject_repauses_then_approves():
+    """CP1 reject → the run re-pauses at CP1 (a fresh interrupt_id) instead of
+    crashing; a follow-up approve drives the loop to the ledger. Two CP1 pauses
+    with DISTINCT interrupt_ids prove the resumable-abort re-entry."""
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    ledger, pause_log = await _drive_scripted(
+        workflow,
+        cp1_replies=[CHECKPOINT_REJECT, approve.model_dump(mode="json")],
+        cp2_replies=[""],
+    )
+
+    cp1_pauses = [iid for kind, iid in pause_log if kind == "cp1"]
+    assert len(cp1_pauses) == 2, f"CP1 did not re-pause on reject: {pause_log}"
+    assert cp1_pauses[0] != cp1_pauses[1], "reject re-pause reused the interrupt_id"
+    # After the approve, the loop ran to a real ledger.
+    assert isinstance(ledger, ClaimLedger)
+    assert ledger.kept_count("s1") == 1
+
+
+async def test_cp2_reject_repauses_then_approves():
+    """CP2 reject → the run re-pauses at CP2 (fresh interrupt_id), then an empty
+    approve completes. Two CP2 pauses with distinct interrupt_ids prove re-entry."""
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    ledger, pause_log = await _drive_scripted(
+        workflow,
+        cp1_replies=[approve.model_dump(mode="json")],
+        cp2_replies=[CHECKPOINT_REJECT, ""],
+    )
+
+    cp2_pauses = [iid for kind, iid in pause_log if kind == "cp2"]
+    assert len(cp2_pauses) == 2, f"CP2 did not re-pause on reject: {pause_log}"
+    assert cp2_pauses[0] != cp2_pauses[1], "reject re-pause reused the interrupt_id"
+    assert isinstance(ledger, ClaimLedger)
+    assert ledger.kept_count("s1") == 1
+
+
+async def test_cp3_reject_repauses_then_done():
+    """CP3 reject (the reserved sentinel) → the deep-only CP3 re-pauses with an
+    attempt-suffixed interrupt_id, then a ``d`` (done) reply proceeds. The first
+    CP3 pass keeps the original ``cp3_s1_0`` id; the reject retry is
+    ``cp3_s1_0_1`` — proving the resumable re-entry at the same checkpoint."""
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = _single_deep_subtopic_workflow(verifier)
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.DEEP,
+    )
+
+    # Script CP3: reject on the first sight of cp3_s1_0, then done. Use a callable
+    # cp3_reply via the existing multi-pause harness extended for reject.
+    seen: list[str] = []
+
+    def cp3_script(iid: str) -> str:
+        seen.append(iid)
+        # Reject the very first CP3 pause, accept (done) on the re-pause.
+        return CHECKPOINT_REJECT if seen.count(iid) == 1 and iid == "cp3_s1_0" else "d"
+
+    ledger = await _drive_through_checkpoints(
+        workflow, approved_plan=approve, cp3_reply=cp3_script
+    )
+
+    # CP3 paused at the original id AND at the attempt-suffixed retry id.
+    assert "cp3_s1_0" in seen
+    assert "cp3_s1_0_1" in seen, f"CP3 did not re-pause on reject: {seen}"
+    assert isinstance(ledger, ClaimLedger)
+    assert ledger.kept_count("s1") == 1
+
+
+async def test_cp1_reject_does_not_rerun_clarify_or_plan():
+    """Port of v1 ``test_cp1_reject_raises`` to the node harness: a CP1 reject leaves
+    the upstream (clarify/plan) checkpoint-skipped — they ran exactly ONCE even
+    across the reject re-pause (resumable abort, not a full restart)."""
+    clarifier_calls: list[int] = []
+    planner_calls: list[int] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    # Counting planner forces DEEP w/ 2 subtopics; we approve a 1-subtopic NORMAL
+    # plan at CP1 so the loop is small and CP3 stays out of the way.
+    workflow = build_research_workflow(
+        clarifier_node=_counting_clarifier_stub(clarifier_calls),
+        planner_node=_counting_planner_stub(planner_calls),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    _, pause_log = await _drive_scripted(
+        workflow,
+        cp1_replies=[CHECKPOINT_REJECT, CHECKPOINT_REJECT, approve.model_dump(mode="json")],
+        cp2_replies=[""],
+    )
+
+    # CP1 paused THREE times (reject, reject, approve) — all distinct ids.
+    cp1_pauses = [iid for kind, iid in pause_log if kind == "cp1"]
+    assert len(cp1_pauses) == 3
+    assert len(set(cp1_pauses)) == 3
+    # ...yet clarify/plan ran exactly once across every reject re-pause.
+    assert clarifier_calls == [1], f"clarifier re-ran on CP1 reject: {clarifier_calls}"
+    assert planner_calls == [1], f"planner re-ran on CP1 reject: {planner_calls}"

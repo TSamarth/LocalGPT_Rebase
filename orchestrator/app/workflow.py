@@ -59,6 +59,54 @@ from .research_policy import depth_budget, merge_ledger, stop_rule
 from .schemas import ClaimLedger, Depth, ResearchPlan, ScoredURL
 from .session import SessionStore
 
+# ── Reject signal (E3.S1 T3) ─────────────────────────────────────────────────
+# The v1 console gates raised ``CheckpointRejected`` on a reject; ``run_pipeline``
+# caught it and left the session at its last stage — aborted but resumable
+# (``checkpoint.py:37``, ``pipeline.py:303``). The v2 node path has no exception
+# channel that preserves resumability: a node that *raises* is recorded
+# ``NodeStatus.FAILED`` (``_node_runner.py:139`` sets ``ctx._error`` →
+# ``_dynamic_node_scheduler._record_result`` → FAILED), which is terminal, NOT a
+# resumable pause. The only resumable-pause outcome in ADK 2.3.0 is a node that
+# yields a ``RequestInput`` interrupt (``NodeStatus.WAITING``). So a "reject =
+# resumable abort at the rejecting checkpoint" is implemented the ADK-native way:
+# the reject reply is a reserved sentinel string, and on seeing it the parent
+# RE-ISSUES a fresh ``RequestInput`` pause at the SAME logical checkpoint (a new
+# per-attempt ``interrupt_id``) — exactly the "rejection/retry cycle" the ADK
+# ``RequestInput.interrupt_id`` docstring sanctions. The run halts there,
+# resumable by ``invocation_id``; resuming re-enters that checkpoint.
+CHECKPOINT_REJECT = "__reject__"
+
+
+def _is_str_reject(reply: str) -> bool:
+    """True iff a ``response_schema=str`` reply (CP2/CP3) is the reject sentinel.
+
+    Collision-safe: the reply is compared against the reserved token verbatim.
+    A real CP2 edit is arbitrary markdown and a real CP3 reply is verb lines —
+    neither is ever the bare literal ``"__reject__"`` (CP3 splits on whitespace,
+    so the sentinel is its own line/verb and matches no ``+/-/r/d`` verb).
+    """
+    return reply.strip() == CHECKPOINT_REJECT
+
+
+def _is_cp1_reject(raw: object) -> bool:
+    """True iff a CP1 (``response_schema=ResearchPlan``) reply is the reject signal.
+
+    CP1's reply MUST satisfy ``response_schema=ResearchPlan`` — ADK 2.3.0 validates
+    the resume response against that schema at rehydration time
+    (``_rehydration_utils._validate_resume_response``), BEFORE the parent sees it,
+    so an arbitrary ``{"__reject__": ...}`` mapping is rejected by ADK itself and
+    never reaches here. The reject signal therefore has to be a SCHEMA-VALID
+    ``ResearchPlan`` that is still unambiguous: an **empty ``subtopics`` list**.
+    ``ResearchPlan.subtopics`` has no ``min_length`` so ``{"subtopics": []}``
+    validates, yet a real/edited plan ALWAYS carries at least one subtopic (a
+    zero-subtopic plan has nothing to research) — so it can never collide with a
+    legitimate approval/edit. Checked on the RAW ``run_node`` dict (the parent
+    coerces a non-reject reply via ``parse_plan`` afterwards).
+    """
+    if isinstance(raw, ResearchPlan):
+        return not raw.subtopics
+    return isinstance(raw, dict) and raw.get("subtopics") == []
+
 
 def _cp1_summary(plan: ResearchPlan) -> str:
     """Human-readable plan summary for the CP1 prompt.
@@ -81,28 +129,40 @@ def _cp1_summary(plan: ResearchPlan) -> str:
     return "\n".join(lines)
 
 
-@node(rerun_on_resume=False)
-async def _cp1_checkpoint(node_input: ResearchPlan):
-    """Checkpoint 1 (T4) — block for human plan approval via ``RequestInput``.
+def _make_cp1_checkpoint():
+    """Build a per-attempt CP1 ``RequestInput`` plan-approval node.
 
-    ``node_input`` is the planner's ``ResearchPlan`` (passed by the parent as
-    ``ctx.run_node(_cp1_checkpoint, plan)``). The node ``yield``s a
-    ``RequestInput`` carrying the ported plan summary (``message``), the plan
+    A factory (returning a FRESH node each call) so a reject can re-issue a new
+    pause at this checkpoint (T3's resumable-abort retry cycle): each
+    ``ctx.run_node(_make_cp1_checkpoint(), plan)`` call auto-increments the node's
+    ``run_id`` (``Context.run_node`` keys ``_child_run_counters`` by node name), so
+    every attempt is a distinct ``node_path`` with its own default ``interrupt_id``
+    UUID — the run pauses afresh each reject, resumable by ``invocation_id``. The
+    node mirrors the original ``_cp1_checkpoint``: ``@node(rerun_on_resume=False)``
+    yields ``RequestInput`` carrying the ported plan summary (``message``), the plan
     itself (``payload``), and ``response_schema=ResearchPlan`` — which pauses the
-    workflow. ADK validates the human's resume response against that schema, so
-    the value the parent receives back from ``ctx.run_node`` is the approved
-    (possibly edited) plan as a dict.
+    workflow. ADK validates the human's resume response against that schema, so the
+    value the parent receives back from ``ctx.run_node`` is the approved (possibly
+    edited) plan as a dict (or the reject signal — a SCHEMA-VALID empty-``subtopics``
+    plan, caught by the parent's ``_is_cp1_reject`` BEFORE ``parse_plan``; an
+    arbitrary sentinel mapping can't be used under ``response_schema=ResearchPlan``
+    because ADK validates the resume response against that schema first).
 
     ``rerun_on_resume=False``: this node does not re-execute on resume — the
     framework treats the injected response as the node's output directly. (The
     parent ``research`` node, which *calls* ``ctx.run_node``, is the one that
     must be ``rerun_on_resume=True``.)
     """
-    yield RequestInput(
-        message=_cp1_summary(node_input),
-        payload=node_input,
-        response_schema=ResearchPlan,
-    )
+
+    @node(rerun_on_resume=False)
+    async def _cp1_checkpoint(node_input: ResearchPlan):
+        yield RequestInput(
+            message=_cp1_summary(node_input),
+            payload=node_input,
+            response_schema=ResearchPlan,
+        )
+
+    return _cp1_checkpoint
 
 
 def _cp2_summary(draft: str) -> str:
@@ -123,12 +183,17 @@ def _cp2_summary(draft: str) -> str:
     )
 
 
-@node(rerun_on_resume=False)
-async def _cp2_checkpoint(node_input: str):
-    """Checkpoint 2 (T1) — block for human draft approval via ``RequestInput``.
+def _make_cp2_checkpoint():
+    """Build a per-attempt CP2 ``RequestInput`` draft-approval node.
+
+    A factory (returning a FRESH node each call), like ``_make_cp1_checkpoint``,
+    so a reject can re-issue a new pause at this checkpoint (T3's resumable-abort
+    retry cycle): each ``ctx.run_node`` call auto-increments the node's ``run_id``,
+    so every attempt is a distinct ``node_path``/``interrupt_id`` and the run
+    pauses afresh each reject, resumable by ``invocation_id``.
 
     ``node_input`` is the rendered markdown ``draft`` (passed by the parent as
-    ``ctx.run_node(_cp2_checkpoint, draft)``). The node ``yield``s a
+    ``ctx.run_node(_make_cp2_checkpoint(), draft)``). The node ``yield``s a
     ``RequestInput`` carrying the ported header (``message``), the draft itself
     (``payload``), and ``response_schema=str`` — which pauses the workflow.
 
@@ -143,22 +208,26 @@ async def _cp2_checkpoint(node_input: str):
     the v1 ``cp2_checkpoint`` approve/edit semantics — approve returns the draft as
     is, edit replaces it with the saved text.
 
-    **Reject is deferred to T3.** T3 owns reject semantics across CP1/CP2/CP3 (a
-    resumable abort). This node is intentionally structured so T3 can add reject
-    cleanly: the resume reply is a plain ``str`` here, and the parent's
-    approve-vs-edit decision lives next to the ``ctx.run_node`` call — a reject
-    sentinel/abort can be layered on without changing this node's shape.
+    **Reject (T3):** the reserved reply ``"__reject__"`` is the reject signal
+    (``_is_str_reject``). It is collision-safe — a real edit is arbitrary markdown,
+    never the bare sentinel. The parent treats it as a resumable abort by re-issuing
+    a fresh CP2 pause (see the ``research`` body), so the run halts here resumably.
 
     ``rerun_on_resume=False``: this node does not re-execute on resume — the
     framework treats the injected response as the node's output directly (the
     parent ``research`` node, which *calls* ``ctx.run_node``, is the one that is
     ``rerun_on_resume=True``).
     """
-    yield RequestInput(
-        message=_cp2_summary(node_input),
-        payload=node_input,
-        response_schema=str,
-    )
+
+    @node(rerun_on_resume=False)
+    async def _cp2_checkpoint(node_input: str):
+        yield RequestInput(
+            message=_cp2_summary(node_input),
+            payload=node_input,
+            response_schema=str,
+        )
+
+    return _cp2_checkpoint
 
 
 def _cp3_summary(urls: list[ScoredURL]) -> str:
@@ -306,10 +375,24 @@ def build_research_workflow(
             store.save_plan(plan)
 
         # ── CP1 (T4): real RequestInput plan-approval checkpoint ─────────────
-        # ``_cp1_checkpoint`` yields RequestInput and pauses; on resume the
+        # ``_make_cp1_checkpoint()`` yields RequestInput and pauses; on resume the
         # human-supplied plan comes back as a dict — coerce it via ``parse_plan``
         # (which also re-applies the depth policy to any edited subtopics).
-        approved = parse_plan(await ctx.run_node(_cp1_checkpoint, plan))
+        #
+        # ── CP1 reject (T3): resumable abort ─────────────────────────────────
+        # A reject reply rides as a SCHEMA-VALID empty-``subtopics`` plan (ADK
+        # validates the resume response against ``response_schema=ResearchPlan``
+        # first, so a free-form sentinel mapping can't be used here — see
+        # ``_is_cp1_reject``). Detected on the RAW run_node output BEFORE
+        # ``parse_plan``. On reject we re-issue a FRESH CP1 pause (a new node
+        # instance → new run_id/interrupt_id → the run halts again at this
+        # checkpoint, resumable by ``invocation_id``). The loop continues until the
+        # human approves/edits a real (non-empty) plan.
+        while True:
+            cp1_reply = await ctx.run_node(_make_cp1_checkpoint(), plan)
+            if not _is_cp1_reject(cp1_reply):
+                break
+        approved = parse_plan(cp1_reply)
 
         # ── Toolset-once / close() lifecycle (E2.S2 T4) ──────────────────────
         # Build each OWNED crawl4ai MCPToolset exactly ONCE per run here at loop
@@ -379,8 +462,26 @@ def build_research_workflow(
                     # ``str``, which ``apply_cp3_verbs`` turns into
                     # ``(filtered_urls, needs_supplemental)``.
                     if approved.depth == Depth.DEEP:
-                        cp3 = _make_cp3_checkpoint(f"cp3_{subtopic.id}_{iteration}")
-                        reply = str(await ctx.run_node(cp3, urls) or "")
+                        # ── CP3 reject (T3): resumable abort ─────────────────
+                        # v1's CP3 had NO reject verb (``checkpoint.py:127-141``),
+                        # but T3 mandates reject cover CP3, so we add the reserved
+                        # ``"__reject__"`` reply (``_is_str_reject``) — collision-
+                        # safe with the ``+/-/r/d`` verb grammar. On reject we
+                        # re-issue a FRESH CP3 pause with an attempt-suffixed
+                        # interrupt_id (first attempt keeps the original
+                        # ``cp3_{id}_{iter}`` id so existing tests are unaffected),
+                        # halting resumably at this checkpoint until a non-reject
+                        # verb reply arrives.
+                        cp3_attempt = 0
+                        while True:
+                            cp3_iid = f"cp3_{subtopic.id}_{iteration}"
+                            if cp3_attempt:
+                                cp3_iid = f"{cp3_iid}_{cp3_attempt}"
+                            cp3 = _make_cp3_checkpoint(cp3_iid)
+                            reply = str(await ctx.run_node(cp3, urls) or "")
+                            if not _is_str_reject(reply):
+                                break
+                            cp3_attempt += 1
                         urls, needs_supplemental = apply_cp3_verbs(urls, reply)
 
                         # ── Supplemental re-entry (v2 analog of v1 appending
@@ -444,11 +545,20 @@ def build_research_workflow(
 
         # ── CP2 (T1): real RequestInput draft-approval checkpoint ────────────
         # Runs on EVERY path that reaches the Writer (unconditional — NOT deep-
-        # gated). The ``_cp2_checkpoint`` node yields RequestInput and pauses; on
-        # resume the human's reply comes back as a ``str``. Approve = empty reply
+        # gated). The ``_make_cp2_checkpoint()`` node yields RequestInput and pauses;
+        # on resume the human's reply comes back as a ``str``. Approve = empty reply
         # (keep ``draft`` unchanged); edit = non-empty reply (the reply IS the
-        # edited markdown, round-tripped verbatim). Reject is deferred to T3.
-        reply = str(await ctx.run_node(_cp2_checkpoint, draft) or "")
+        # edited markdown, round-tripped verbatim).
+        #
+        # ── CP2 reject (T3): resumable abort ─────────────────────────────────
+        # The reserved reply ``"__reject__"`` (``_is_str_reject``) is the reject
+        # signal — collision-safe (a real edit is arbitrary markdown). On reject we
+        # re-issue a FRESH CP2 pause (new node instance → new run_id/interrupt_id),
+        # halting resumably at this checkpoint until an approve/edit reply arrives.
+        while True:
+            reply = str(await ctx.run_node(_make_cp2_checkpoint(), draft) or "")
+            if not _is_str_reject(reply):
+                break
         approved_draft = reply if reply else draft
 
         # Mirror the (approved/edited) draft to disk so out-of-band inspection and
