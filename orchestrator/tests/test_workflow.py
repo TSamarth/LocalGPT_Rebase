@@ -110,6 +110,24 @@ def _extractor_stub() -> object:
     return _stub
 
 
+WRITER_BODY = "## Findings\n\nWriter prose body for the draft."
+
+
+def _writer_stub() -> object:
+    """Canned writer node: returns a fixed markdown body string, no model call.
+
+    The default Writer is a live ``LlmAgent``; injecting this stub keeps the
+    offline builders from reaching Ollama. With no ``output_schema`` the real
+    Writer hands back a ``str`` body, so the stub returns a ``str`` too.
+    """
+
+    @node
+    async def _stub(node_input: str) -> str:
+        return WRITER_BODY
+
+    return _stub
+
+
 def _kept_claim(claim_id: str, subtopic_id: str) -> Claim:
     """A claim that enriches to KEPT — two independent (distinct-etld1) sources."""
     return Claim(
@@ -165,6 +183,7 @@ def _build_loop_workflow(*, planner_node, verifier_node, store=None):
         acquirer_node=_acquirer_stub(),
         extractor_node=_extractor_stub(),
         verifier_node=verifier_node,
+        writer_node=_writer_stub(),
         store=store,
     )
 
@@ -485,6 +504,7 @@ async def test_resume_reruns_cp1_only():
         acquirer_node=_acquirer_stub(),
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
+        writer_node=_writer_stub(),
     )
 
     app = _build_app(workflow)
@@ -588,6 +608,7 @@ async def test_cp3_hook_called_per_pass_on_deep_plan():
         acquirer_node=_acquirer_stub(),
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
+        writer_node=_writer_stub(),
         cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
@@ -612,6 +633,7 @@ async def test_cp3_hook_skipped_on_shallow_plan():
         acquirer_node=_acquirer_stub(),
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
+        writer_node=_writer_stub(),
         cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
@@ -635,6 +657,7 @@ async def test_cp3_hook_skipped_on_normal_plan():
         acquirer_node=_acquirer_stub(),
         extractor_node=_extractor_stub(),
         verifier_node=verifier,
+        writer_node=_writer_stub(),
         cp3_hook=_recording_cp3_hook(calls),
     )
     approve_plan = ResearchPlan(
@@ -644,3 +667,46 @@ async def test_cp3_hook_skipped_on_normal_plan():
     await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
 
     assert calls == [], f"CP3 hook fired on a NORMAL plan: {calls}"
+
+
+# ── T0 gate: the workflow renders a markdown draft from the ledger (CP2 input) ───
+async def test_writer_renders_draft_from_ledger():
+    """After the loop, the Writer node + ``render_report`` produce a markdown draft
+    persisted as ``draft.md`` — the artifact CP2 (T1) will consume.
+
+    The injected canned writer returns a known body; the deterministic skeleton
+    (Coverage / Sources sections from ``render_report``) is added on top. The draft
+    must contain BOTH the writer's body AND the deterministic sections.
+    """
+    store = SessionStore.create(RAW_QUERY)
+    verifier = _verifier_stub_from_passes(
+        [
+            ClaimLedger(claims=[_kept_claim("c1", "s1")]),
+            ClaimLedger(claims=[_kept_claim("c2", "s2")]),
+        ]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_planner_stub(),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+        store=store,
+    )
+    approve_plan = ResearchPlan(
+        subtopics=[
+            Subtopic(id="s1", question="angle 1", target_evidence=1),
+            Subtopic(id="s2", question="angle 2", target_evidence=1),
+        ],
+        depth=Depth.DEEP,
+    )
+    await _drive_to_cp1_and_resume(workflow, approved_plan=approve_plan)
+
+    draft = store.load_draft()
+    assert draft is not None, "T0: writer draft was not persisted as draft.md"
+    # The Writer's body prose is present...
+    assert WRITER_BODY in draft
+    # ...and the deterministic render_report sections frame it.
+    assert "## Coverage" in draft
+    assert "## Sources" in draft

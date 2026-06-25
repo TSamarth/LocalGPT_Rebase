@@ -52,6 +52,7 @@ from .agents import extractor as extractor_mod
 from .agents import verifier as verifier_mod
 from .agents.clarifier import build_clarifier, parse_clarify_result
 from .agents.planner import build_planner, parse_plan
+from .agents.writer import build_writer, render_report
 from .llm import build_model
 from .research_policy import depth_budget, merge_ledger, stop_rule
 from .schemas import ClaimLedger, Depth, ResearchPlan, Subtopic
@@ -111,6 +112,7 @@ def build_research_workflow(
     acquirer_node: Optional[BaseNode] = None,
     extractor_node: Optional[BaseNode] = None,
     verifier_node: Optional[BaseNode] = None,
+    writer_node: Optional[BaseNode] = None,
     cp3_hook: Optional[Callable[[Subtopic, int], None]] = None,
 ) -> Workflow:
     """Build the research ``Workflow`` (the START→CP1 slice).
@@ -144,6 +146,14 @@ def build_research_workflow(
             ``build_verifier``. Its raw output is re-enriched via
             :func:`enrich_ledger` (the node path skips v1's auto-enrich).
 
+        writer_node: node run AFTER the research loop to draft the markdown
+            report (T0). Defaults to the ``build_writer`` ``LlmAgent``. The Writer
+            is **reasoning-only and holds NO toolset** — it is resolved at build
+            time (like clarifier/planner) and is NOT added to ``owned_toolsets``.
+            It has no ``output_schema``, so ``ctx.run_node`` returns its emitted
+            markdown as a plain ``str`` body, which :func:`render_report` wraps
+            with the deterministic coverage/contradictions/sources skeleton.
+
         cp3_hook: optional CP3 deep-only pass-through (T5). Called once per loop
             pass — *only* when the approved plan's depth is ``Depth.DEEP`` — as
             ``cp3_hook(subtopic, iteration)`` at the seam between acquire and
@@ -161,6 +171,10 @@ def build_research_workflow(
     # is shared across all passes and closed in a ``finally`` (T4).
     clarifier = clarifier_node if clarifier_node is not None else build_clarifier(model=build_model())
     planner = planner_node if planner_node is not None else build_planner(model=build_model())
+    # The Writer (T0) is reasoning-only and OWNS NO toolset, so — like
+    # clarifier/planner — it is resolved here at build time and is never added
+    # to ``owned_toolsets`` (no build/close lifecycle for it).
+    writer = writer_node if writer_node is not None else build_writer()
 
     @node(rerun_on_resume=True)
     async def research(ctx: Context, node_input: str) -> ClaimLedger:
@@ -294,6 +308,32 @@ def build_research_workflow(
         if store is not None:
             store.save_ledger(ledger)
 
+        # ── T0: run the Writer + render the markdown draft ───────────────────
+        # The Writer is reasoning-only (no toolset, no output_schema). Feed it the
+        # approved ``ResearchPlan`` + accumulated ``ClaimLedger`` as a JSON payload
+        # (same shape v1's ``_write_body`` used). With NO output_schema, ADK's
+        # LlmAgent wrapper sets ``event.output`` to the concatenated text parts —
+        # a plain ``str`` — so ``ctx.run_node`` hands back the markdown body as a
+        # string (verified vs ADK 2.3.0 ``process_llm_agent_output``). Coerce to
+        # ``str`` defensively, then wrap it with the deterministic skeleton via
+        # ``render_report`` (which itself calls coverage_report/split_contradictions).
+        writer_payload = json.dumps(
+            {
+                "plan": approved.model_dump(mode="json"),
+                "ledger": ledger.model_dump(mode="json"),
+            }
+        )
+        body_markdown = str(await ctx.run_node(writer, writer_payload) or "")
+        draft = render_report(approved, ledger, body_markdown=body_markdown)
+
+        # Mirror the draft to disk so CP2 (T1) and out-of-band inspection can read
+        # it — same additive write-through pattern as save_plan/save_ledger.
+        if store is not None:
+            store.save_draft(draft)
+
+        # Terminal output stays the ledger — the draft is a SIDE artifact (kept in
+        # ``draft`` for T1/CP2 to consume). Changing the return would break the v1↔v2
+        # parity gate, which asserts the terminal output is the ``ClaimLedger``.
         return ledger
 
     return Workflow(name="research", edges=[(START, research)])

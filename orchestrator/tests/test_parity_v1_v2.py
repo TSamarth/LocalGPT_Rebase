@@ -196,6 +196,18 @@ def _v2_extractor_stub():
     return _stub
 
 
+def _v2_writer_stub():
+    """Canned writer node (no model call). The Writer runs AFTER the loop and does
+    not touch the ledger, so it is parity-neutral — but the default Writer is a live
+    ``LlmAgent``, so this stub keeps ``_run_v2`` offline. Returns a ``str`` body
+    (the real no-``output_schema`` Writer also yields a ``str``)."""
+
+    @node
+    async def _stub(node_input: str) -> str:
+        return "## Findings\n\nbody."
+    return _stub
+
+
 def _make_v2_verifier_stub(passes: list[dict]):
     """v2 verifier node: returns the next ledger (validated from the SAME dict) per
     call, then empties — call-index closure matching the v1 runner above."""
@@ -240,6 +252,7 @@ async def _run_v2(plan_dict: dict, passes: list[dict]) -> ClaimLedger:
         acquirer_node=_v2_acquirer_stub(),
         extractor_node=_v2_extractor_stub(),
         verifier_node=_make_v2_verifier_stub(passes),
+        writer_node=_v2_writer_stub(),
     )
     app = App(
         name="parity_v2",
@@ -427,6 +440,7 @@ async def test_resume_mid_loop_skips_completed_passes():
         acquirer_node=_v2_acquirer_stub(),
         extractor_node=_v2_extractor_stub(),
         verifier_node=_counting_verifier_stub(passes, call_log),
+        writer_node=_v2_writer_stub(),
     )
     app = App(
         name="parity_resume",
