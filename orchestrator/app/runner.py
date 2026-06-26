@@ -50,7 +50,9 @@ def build_runner(
         plugins: Optional list of plugins to register (e.g. the T2 exporter).
             ADK 2.3.0 requires plugins to live on the ``App``, not the ``Runner``
             directly — so when non-empty a copy of *app* is created with these
-            plugins appended to any already registered on the app.
+            plugins appended to any already registered on the app.  Caller
+            plugins whose ``.name`` already exists on the app are skipped, so an
+            exporter carried on the App (E4.T0) is not double-registered.
 
     Returns:
         A ``Runner`` ready to accept ``run_async`` calls.
@@ -62,7 +64,9 @@ def build_runner(
     # (Runner raises ValueError if ``plugins=`` is passed alongside ``app=``.)
     effective_app = app
     if plugins:
-        merged = list(app.plugins or []) + list(plugins)
+        merged = list(app.plugins or [])
+        existing = {p.name for p in merged}
+        merged.extend(p for p in plugins if p.name not in existing)
         effective_app = app.model_copy(update={"plugins": merged})
 
     return Runner(app=effective_app, session_service=session_service)

@@ -16,10 +16,16 @@ from __future__ import annotations
 
 from google.adk.apps import App, ResumabilityConfig
 
+from .session_exporter import SessionExporterPlugin
 from .workflow import build_research_workflow
 
 app = App(
     name="localgpt_research",
     root_agent=build_research_workflow(),
     resumability_config=ResumabilityConfig(is_resumable=True),
+    # Exporter rides on the App so the server-built runner (which bypasses
+    # ``build_runner``'s ``plugins=``) still projects artifacts to disk.
+    # ``SessionExporterPlugin.__init__`` only builds a ``Path`` — import stays
+    # offline-safe and never reaches Ollama.
+    plugins=[SessionExporterPlugin()],
 )
