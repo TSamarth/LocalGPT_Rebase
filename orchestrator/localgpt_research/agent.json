@@ -1,0 +1,46 @@
+{
+  "capabilities": {},
+  "defaultInputModes": [
+    "text/plain"
+  ],
+  "defaultOutputModes": [
+    "text/plain"
+  ],
+  "description": "An ADK Agent",
+  "name": "research",
+  "preferredTransport": "JSONRPC",
+  "protocolVersion": "0.3.0",
+  "skills": [
+    {
+      "description": "This workflow orchestrates the following nodes: research: Drive the slice: clarify \u2192 plan \u2192 CP1 \u2192 research loop \u2192 ledger.\n\n``node_input`` is the raw user query: as the START node, ADK hands this\nnode the user message and (state-binding mode) passes the ``node_input``\nparameter through directly, auto-converting the user ``Content`` to ``str``.\nThe parameter is named ``node_input`` precisely so ADK's START entry\nbinding supplies it \u2014 naming it anything else makes ADK look the value up\nin (empty) session state.\n\nParent node that calls ``ctx.run_node`` \u2014 hence ``rerun_on_resume=True``\n(ADK re-runs the parent on resume so it can collect interrupted child\nresults; completed children are skipped via auto-checkpointing).",
+      "examples": [],
+      "id": "research",
+      "name": "workflow",
+      "tags": [
+        "graph_workflow"
+      ]
+    },
+    {
+      "description": "Orchestrates: research: Drive the slice: clarify \u2192 plan \u2192 CP1 \u2192 research loop \u2192 ledger.\n\n``node_input`` is the raw user query: as the START node, ADK hands this\nnode the user message and (state-binding mode) passes the ``node_input``\nparameter through directly, auto-converting the user ``Content`` to ``str``.\nThe parameter is named ``node_input`` precisely so ADK's START entry\nbinding supplies it \u2014 naming it anything else makes ADK look the value up\nin (empty) session state.\n\nParent node that calls ``ctx.run_node`` \u2014 hence ``rerun_on_resume=True``\n(ADK re-runs the parent on resume so it can collect interrupted child\nresults; completed children are skipped via auto-checkpointing).",
+      "id": "research-sub-agents",
+      "name": "sub-agents",
+      "tags": [
+        "graph_workflow",
+        "orchestration"
+      ]
+    },
+    {
+      "description": "Drive the slice: clarify \u2192 plan \u2192 CP1 \u2192 research loop \u2192 ledger.\n\n``node_input`` is the raw user query: as the START node, ADK hands this\nnode the user message and (state-binding mode) passes the ``node_input``\nparameter through directly, auto-converting the user ``Content`` to ``str``.\nThe parameter is named ``node_input`` precisely so ADK's START entry\nbinding supplies it \u2014 naming it anything else makes ADK look the value up\nin (empty) session state.\n\nParent node that calls ``ctx.run_node`` \u2014 hence ``rerun_on_resume=True``\n(ADK re-runs the parent on resume so it can collect interrupted child\nresults; completed children are skipped via auto-checkpointing).",
+      "examples": [],
+      "id": "research_research",
+      "name": "research: custom",
+      "tags": [
+        "sub_agent:research",
+        "custom_agent"
+      ]
+    }
+  ],
+  "supportsAuthenticatedExtendedCard": false,
+  "url": "http://localhost:8001/a2a/localgpt_research",
+  "version": "0.0.1"
+}
