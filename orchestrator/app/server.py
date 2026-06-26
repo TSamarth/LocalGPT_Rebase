@@ -60,13 +60,19 @@ def build_server() -> FastAPI:
     return server_app
 
 
-def _mount_a2a(server_app: FastAPI) -> None:
-    """Mount the A2A card + RPC routes for ``localgpt_research``.
+def mount_a2a_routes(server_app, *, runner, agent_card, app_name) -> None:
+    """Mount the A2A card + RPC routes for *app_name* over *runner*.
 
-    Works around the ADK 2.3.0 ``json``-shadowing bug (see module docstring) by
-    loading the static ``agent.json`` and wiring the A2A executor over a
-    DB-backed runner here. No-op if the card route is already present (e.g. a
-    future ADK that fixes the bug mounts it itself).
+    The route-building core shared by the production :func:`_mount_a2a` and the
+    offline A2A HITL gate (``tests/test_a2a_hitl_gate.py``) so both exercise the
+    SAME a2a-sdk wiring (``A2aAgentExecutor`` → ``DefaultRequestHandler`` →
+    ``A2AStarletteApplication``). ``runner`` is passed straight to
+    ``A2aAgentExecutor``, which accepts either a ``Runner`` instance or a
+    (sync/async) callable that returns one — so production can keep its lazy
+    DB-backed loader while the gate injects a stub-workflow runner directly.
+
+    No-op if the card route is already present (e.g. a future ADK that fixes the
+    ``json``-shadow bug mounts it itself).
     """
     from a2a.server.apps import A2AStarletteApplication
     from a2a.server.request_handlers import DefaultRequestHandler
@@ -74,13 +80,35 @@ def _mount_a2a(server_app: FastAPI) -> None:
         InMemoryPushNotificationConfigStore,
         InMemoryTaskStore,
     )
-    from a2a.types import AgentCard
     from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
     from google.adk.a2a.executor.a2a_agent_executor import A2aAgentExecutor
 
-    card_url = f"/a2a/{APP_NAME}{AGENT_CARD_WELL_KNOWN_PATH}"
+    card_url = f"/a2a/{app_name}{AGENT_CARD_WELL_KNOWN_PATH}"
     if any(getattr(r, "path", None) == card_url for r in server_app.routes):
         return
+
+    request_handler = DefaultRequestHandler(
+        agent_executor=A2aAgentExecutor(runner=runner),
+        task_store=InMemoryTaskStore(),
+        push_config_store=InMemoryPushNotificationConfigStore(),
+    )
+    a2a_app = A2AStarletteApplication(
+        agent_card=agent_card, http_handler=request_handler
+    )
+    for route in a2a_app.routes(rpc_url=f"/a2a/{app_name}", agent_card_url=card_url):
+        server_app.router.routes.append(route)
+
+
+def _mount_a2a(server_app: FastAPI) -> None:
+    """Mount the A2A card + RPC routes for ``localgpt_research`` (production).
+
+    Works around the ADK 2.3.0 ``json``-shadowing bug (see module docstring) by
+    loading the static ``agent.json`` and wiring the A2A executor over a
+    DB-backed runner via :func:`mount_a2a_routes`. The runner is built lazily
+    (and cached) inside ``_runner_loader`` so the same session DB backs both the
+    REST and A2A surfaces and no DB is opened until the first A2A request.
+    """
+    from a2a.types import AgentCard
 
     from app.adk_app import app as research_app
     from app.runner import build_runner
@@ -88,25 +116,19 @@ def _mount_a2a(server_app: FastAPI) -> None:
     _cache: dict[str, object] = {}
 
     async def _runner_loader():
-        # Lazily build (and cache) a DB-backed runner over the resumable App so
-        # the A2A surface persists/resumes via the same session DB as REST.
         if "runner" not in _cache:
             _cache["runner"] = build_runner(research_app)
         return _cache["runner"]
 
-    request_handler = DefaultRequestHandler(
-        agent_executor=A2aAgentExecutor(runner=_runner_loader),
-        task_store=InMemoryTaskStore(),
-        push_config_store=InMemoryPushNotificationConfigStore(),
-    )
     agent_card = AgentCard(
         **json.loads(_AGENT_CARD_PATH.read_text(encoding="utf-8"))
     )
-    a2a_app = A2AStarletteApplication(
-        agent_card=agent_card, http_handler=request_handler
+    mount_a2a_routes(
+        server_app,
+        runner=_runner_loader,
+        agent_card=agent_card,
+        app_name=APP_NAME,
     )
-    for route in a2a_app.routes(rpc_url=f"/a2a/{APP_NAME}", agent_card_url=card_url):
-        server_app.router.routes.append(route)
 
 
 def main() -> None:
