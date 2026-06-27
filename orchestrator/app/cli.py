@@ -9,8 +9,8 @@ v2 analog of ``main.py``'s in-process console loop, over the wire:
 3. When the workflow pauses at a CP1/CP2/CP3 ``RequestInput`` (surfaced as the
    long-running ``adk_request_input`` function call), render the checkpoint to
    the terminal and collect the human reply — reusing the SAME display + verb
-   logic as the in-process path: ``app.checkpoint.cp1_checkpoint`` /
-   ``cp2_checkpoint`` for CP1/CP2 (approve / edit / reject), and
+   logic as the in-process path: the inlined ``_render_cp1`` / ``_render_cp2``
+   renderers for CP1/CP2 (approve / edit / reject), and
    ``app.cp3_adapter.apply_cp3_verbs`` for the CP3 ``+add/-exclude/r/d`` grammar.
 4. Post the ``RequestInput`` response and RESUME by ``invocation_id`` on the next
    ``/run_sse`` POST (ADK's resume-by-``invocation_id`` mechanic).
@@ -26,8 +26,12 @@ in-process resume harness does. Target is localhost only (``app.server`` HOST/PO
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -38,9 +42,8 @@ from google.adk.workflow.utils._workflow_hitl_utils import (
     has_request_input_function_call,
 )
 from google.genai import types
+from pydantic import ValidationError
 
-from app import checkpoint
-from app.checkpoint import CheckpointRejected
 from app.cp3_adapter import apply_cp3_verbs
 from app.schemas import ClaimLedger, ResearchPlan, ScoredURL
 from app.server import APP_NAME, HOST, PORT
@@ -51,6 +54,77 @@ BASE_URL = f"http://{HOST}:{PORT}"
 
 # Guard against a non-terminating resume loop (real runs need far fewer hops).
 _MAX_HOPS = 200
+
+
+class CheckpointRejected(Exception):
+    """Raised when the user rejects an artifact at a checkpoint. The orchestrator
+    catches this and marks the session aborted."""
+
+
+# ── editor helper ──────────────────────────────────────────────────────────────
+def _launch_editor(path: Path) -> None:
+    """Open ``path`` in ``$EDITOR`` (``notepad`` on Windows when unset), blocking
+    until the editor exits. Monkeypatched in tests to inject edited content."""
+    editor = os.environ.get("EDITOR") or "notepad"
+    subprocess.run([editor, str(path)], check=False)
+
+
+def _edit_text(initial: str, suffix: str) -> str:
+    """Round-trip ``initial`` through a temp file + ``$EDITOR``; return the saved text."""
+    fd, name = tempfile.mkstemp(suffix=suffix)
+    path = Path(name)
+    try:
+        os.close(fd)
+        path.write_text(initial, encoding="utf-8")
+        _launch_editor(path)
+        return path.read_text(encoding="utf-8")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# ── CP1 — ResearchPlan ──────────────────────────────────────────────────────────
+def _render_cp1(plan: ResearchPlan) -> ResearchPlan:
+    """Block until the user approves/edits/rejects the plan. Returns the (possibly
+    edited) plan; raises :class:`CheckpointRejected` on reject."""
+    while True:
+        print("\n=== Checkpoint 1: Research Plan ===")
+        print(f"depth={plan.depth.value}  subtopics={len(plan.subtopics)}  "
+              f"seed_urls={len(plan.seed_urls)}")
+        for st in plan.subtopics:
+            print(f"  - [{st.id}] {st.question} (target_evidence={st.target_evidence})")
+
+        choice = input("[a]pprove / [e]dit / [r]eject: ").strip().lower()
+        if choice in ("a", "approve"):
+            return plan
+        if choice in ("r", "reject"):
+            raise CheckpointRejected("CP1: plan rejected by user")
+        if choice in ("e", "edit"):
+            edited = _edit_text(plan.model_dump_json(indent=2), suffix=".json")
+            try:
+                plan = ResearchPlan.model_validate_json(edited)
+            except ValidationError as exc:
+                print(f"Invalid plan, keeping previous version:\n{exc}")
+            continue
+        print("Unrecognized choice.")
+
+
+# ── CP2 — draft report ──────────────────────────────────────────────────────────
+def _render_cp2(draft: str) -> str:
+    """Block until the user approves/edits/rejects the draft. Returns the (possibly
+    edited) markdown; raises :class:`CheckpointRejected` on reject."""
+    while True:
+        print("\n=== Checkpoint 2: Draft Report ===")
+        print(f"({len(draft)} chars)")
+
+        choice = input("[a]pprove / [e]dit / [r]eject: ").strip().lower()
+        if choice in ("a", "approve"):
+            return draft
+        if choice in ("r", "reject"):
+            raise CheckpointRejected("CP2: draft rejected by user")
+        if choice in ("e", "edit"):
+            draft = _edit_text(draft, suffix=".md")
+            continue
+        print("Unrecognized choice.")
 
 
 async def _create_session(client: httpx.AsyncClient, app_name: str, user_id: str) -> str:
@@ -105,7 +179,7 @@ def _answer_cp1(payload: Any) -> dict[str, Any]:
     the schema-valid empty-``subtopics`` reject signal)."""
     plan = ResearchPlan.model_validate(payload)
     try:
-        approved = checkpoint.cp1_checkpoint(plan)
+        approved = _render_cp1(plan)
     except CheckpointRejected:
         return {"subtopics": []}
     return approved.model_dump(mode="json")
@@ -116,7 +190,7 @@ def _answer_cp2(payload: Any) -> dict[str, Any]:
     approve unchanged, the edited markdown to edit, or the reject sentinel."""
     draft = payload if isinstance(payload, str) else ""
     try:
-        approved = checkpoint.cp2_checkpoint(draft)
+        approved = _render_cp2(draft)
     except CheckpointRejected:
         return {"result": CHECKPOINT_REJECT}
     return {"result": "" if approved == draft else approved}
