@@ -27,10 +27,10 @@
 - **Models**: Qwen2.5-14B-Instruct Q4_K_M (reasoning, ~9 GB VRAM) + nomic-embed-text (embedding, ~0.5 GB). `keep_alive=-1`, 8B fallback. **`ollama_chat/` provider** + set **`OLLAMA_API_BASE` env var** at startup.
 - **Orchestration runtime (v2)**: ADK **dynamic workflow** (`@node`/`Workflow`/`ctx.run_node`) under an `App`. Replaces the v1 deterministic `app/stage_machine.py` + `app/orchestrator.py` + `app/pipeline.py` `_run_sync` driver.
 - **Session/resume (v2)**: **ADK-owned** via `App(resumability_config=ResumabilityConfig(is_resumable=True))`, resume by `invocation_id`. `data/sessions/{id}/*.json` = write-through export only; `stage.json` retired.
-- **Front-end / serving**: **`adk api_server`** (local service) + thin CLI. A2A exposure via `to_a2a(root, port=8001)` or `adk api_server --a2a`, bound to localhost.
+- **Front-end / serving**: unified **`get_fast_api_app(a2a=True)`** (✅ E4/P5, `app/server.py`) — one localhost:8001 process serving REST (`/run_sse`, session CRUD, `/list-apps`) **and** the A2A protocol (card + RPC); equivalent CLI `adk api_server --a2a`. Thin httpx REST CLI = `app/cli.py`. Chosen over `to_a2a` (A2A-only, no `/run_sse`). Bound to localhost.
 - **Checkpoint UX (v2)**: ADK **`RequestInput`** nodes (resumable over api_server/SSE). CP1 (plan), CP2 (draft), CP3 (mid-acquisition, deep-only). Replaces v1 console `app/checkpoint.py`.
 - **A2A boundary**: the whole pipeline is one A2A server (local-first); the 6 specialists stay local nodes on the one hot model (not A2A peers) — A2A overhead buys no concurrency under the RAM limit.
-- *(v1, now superseded)*: deterministic stage machine wrapping LLM calls; `SessionStore` as truth + `stage.json` resume; CLI/`$EDITOR` checkpoints. Code still at v1 — migration = architecture.md §15.
+- *(v1, now superseded)*: deterministic stage machine wrapping LLM calls; `SessionStore` as truth + `stage.json` resume; CLI/`$EDITOR` checkpoints. Migration = architecture.md §15: steps 1–6 ✅ done (E0–E4 on `dev`); v1 shell deletion = E5 (still present until then for parity/imports).
 
 ## Repo Pointers
 - Project root: `C:\Users\samar\PycharmProjects\GoogleADK\LocalGPT_Rebase`

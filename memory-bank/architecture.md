@@ -289,6 +289,8 @@ Each contradiction carries `confidence_score: float [0,1]` + `conflict_type: fac
 
 ## 13. A2A Exposure & Local-First Topology (NEW)
 
+> **As built (E4/P5, 2026-06-27):** the landed exposure is the **unified `get_fast_api_app(a2a=True)`** factory (`app/server.py`) — one localhost:8001 process serving **both** REST (`/run_sse`, session CRUD, `/list-apps`) **and** the A2A protocol (card + RPC), chosen over `to_a2a` (A2A-only, no `/run_sse`). App name landed as **`localgpt_research`** (the `deep_research` below is a design-time placeholder); card at `/a2a/localgpt_research/.well-known/agent-card.json` with `text/plain` in / `text/markdown` out + the A2A new-executor extension advertised. ADK 2.3.0 `json`-shadow bug 404s the auto-mounted card → hand-rolled `_mount_a2a` (future-ADK-safe guard). HITL pause/resume proven over the A2A protocol itself (HARD GATE) + REST resume-by-`invocation_id`. CLI = `app/cli.py`; `RemoteA2aAgent(use_legacy=False)` example = `app/a2a_client_example.py`. Specialists NOT split onto own servers (seam only). Detail: [../claudedocs/spawn_v1_to_v2_migration.md] E4 + [../claudedocs/E4_execution_plan.md].
+
 **Intent:** A2A is the project's reason for choosing ADK, but it must be applied where it pays off — at the **pipeline boundary**, not between the six co-resident specialists (ADK guidance + the RAM constraint, §0/§2).
 
 **Exposure (one of two equivalent paths):**
@@ -328,18 +330,20 @@ The agent card is published at the well-known path (`…/a2a/deep_research/.well
 
 ## 15. Migration: v1 (hand-rolled) → v2 (ADK 2.x) (NEW)
 
-Code today implements v1 (Stories 1–5: `orchestrator.py`, `stage_machine.py` driver, `pipeline.py` `_run_sync`, `SessionStore` as truth, console `checkpoint.py`). The deterministic policy + agents + schemas + MCP carry over unchanged; only the orchestration shell changes. Suggested sequence (design-level; execute via `/sc:implement`):
+Code today implements v1 (Stories 1–5: `orchestrator.py`, `stage_machine.py` driver, `pipeline.py` `_run_sync`, `SessionStore` as truth, console `checkpoint.py`). The deterministic policy + agents + schemas + MCP carry over unchanged; only the orchestration shell changes. Suggested sequence (design-level; execute via `/sc:implement`).
 
-1. **Tier 0 correctness first** (review §0): set `OLLAMA_API_BASE`; pin `google-adk>=2.3,<3`; build each `MCPToolset` once/run + `close()`. Independent of the rewrite, de-risks the env.
-2. **Stand up `App` + a one-node `Workflow`** wrapping the existing Clarifier→Planner path with a `RequestInput` CP1; enable `ResumabilityConfig`. Validate ADK-owned resume on a trivial slice. Keep `SessionStore` writing in parallel (write-through) for safety.
-3. **Port the research loop** (`while` + `stop_rule` + subtopic iteration) into a `@node`; wrap Acquirer/Extractor/Verifier as nodes via `ctx.run_node`; reuse the policy functions verbatim.
-4. **Replace checkpoints** with `RequestInput` (CP2, CP3 + CP3 input adapter); delete console `checkpoint.py` once parity is proven.
-5. **Flip session ownership** to ADK; demote `SessionStore` to an export callback/plugin; retire `stage.json`-based resume.
-6. **Expose A2A** via `to_a2a(root)` / `adk api_server --a2a` on localhost; add the agent card; wire the thin CLI to `/run_sse`.
-7. **Retire** `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` once the workflow is the sole driver.
+> **Status (2026-06-27):** steps 1–6 ✅ done (committed to `dev`, 273 orchestrator + 43 MCP green; all 4 HARD GATES passed); step 7 (retire v1 shell) + real-HW acceptance pending = E5. Per-step execution detail in [../claudedocs/spawn_v1_to_v2_migration.md] *Execution Log*.
+
+1. ✅ **Tier 0 correctness first** (review §0): set `OLLAMA_API_BASE`; pin `google-adk>=2.3,<3`; build each `MCPToolset` once/run + `close()`. Independent of the rewrite, de-risks the env.
+2. ✅ **Stand up `App` + a one-node `Workflow`** wrapping the existing Clarifier→Planner path with a `RequestInput` CP1; enable `ResumabilityConfig`. Validate ADK-owned resume on a trivial slice. Keep `SessionStore` writing in parallel (write-through) for safety.
+3. ✅ **Port the research loop** (`while` + `stop_rule` + subtopic iteration) into a `@node`; wrap Acquirer/Extractor/Verifier as nodes via `ctx.run_node`; reuse the policy functions verbatim.
+4. ✅ **Replace checkpoints** with `RequestInput` (CP2, CP3 + CP3 input adapter); delete console `checkpoint.py` once parity is proven *(delete deferred to step 7 — still imported by the v1 shell)*.
+5. ✅ **Flip session ownership** to ADK; demote `SessionStore` to an export callback/plugin (`SessionExporterPlugin`); retire `stage.json`-based resume.
+6. ✅ **Expose A2A** — landed as the unified `get_fast_api_app(a2a=True)` (REST + A2A in one localhost process) over `to_a2a`; add the agent card; wire the thin CLI to `/run_sse` (§13 "As built").
+7. ⏳ **Retire** `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` + console `checkpoint.py` once the workflow is the sole driver (= E5.S1).
 
 Acceptance: AC1–AC7 must still pass end-to-end; resume-by-`invocation_id` and a localhost A2A round-trip become new acceptance checks.
 
 ---
 
-**Next step:** `/sc:workflow` to re-sequence the task breakdown for the v1→v2 migration (§15), or `/sc:implement` to start with Tier-0 correctness + the §15 step-2 workflow slice.
+**Next step:** §15 steps 1–6 are done (E0–E4 on `dev`). Remaining = **E5** — retire the v1 shell (§15 step 7 / spawn-doc E5.S1) then prove the migration E2E on real hardware (AC1–AC7 + resume + A2A round-trip + OOM; needs the E0.S3 model pull). Plans: [../claudedocs/workflow_v1_to_v2_migration.md] (P6/P7) + [../claudedocs/spawn_v1_to_v2_migration.md] (E5).
