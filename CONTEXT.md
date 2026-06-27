@@ -8,24 +8,46 @@ Two independent packages, each with its own `pyproject.toml` and `.venv`:
 
 ```
 LocalGPT_Rebase/
-├── orchestrator/          # A2A pipeline package (Story 1 done; agents TBD)
+├── orchestrator/          # A2A pipeline package (Stories 1–5 + v2 migration E0–E4 done)
 │   ├── app/
-│   │   ├── schemas.py     # Pydantic v2 artifact contracts — the inter-agent API
-│   │   ├── config.py      # dataclass config loaded from env/.env
-│   │   └── session.py     # SessionStore: create/resume, JSON artifact persistence
+│   │   ├── schemas.py          # Pydantic v2 artifact contracts — inter-agent API (frozen)
+│   │   ├── config.py           # dataclass config loaded from env/.env
+│   │   ├── llm.py              # one-hot model factory (build_model / build_agent)
+│   │   │
+│   │   ├── # — v2 live (ADK 2.x dynamic-workflow shell) ——————————
+│   │   ├── workflow.py         # @node research() — clarify→plan→CP1→loop→write→CP2
+│   │   ├── adk_app.py          # App(name="localgpt_research", ResumabilityConfig)
+│   │   ├── runner.py           # build_runner() factory; DatabaseSessionService (SQLite)
+│   │   ├── session_exporter.py # SessionExporterPlugin — on_event/after_run → disk JSON
+│   │   ├── research_policy.py  # pure stop_rule / merge_ledger / depth_budget (shared v1+v2)
+│   │   ├── cp3_adapter.py      # apply_cp3_verbs — free-text CP3 reply → (urls, needs_supplemental)
+│   │   ├── server.py           # get_fast_api_app(a2a=True) + _mount_a2a (ADK 2.3.0 bug workaround)
+│   │   ├── cli.py              # thin httpx REST CLI: POST /run_sse + HITL via checkpoint + cp3_adapter
+│   │   ├── a2a_client_example.py  # RemoteA2aAgent(use_legacy=False) consumption seam (doc/example)
+│   │   │
+│   │   ├── # — v1 legacy (pending retire in E5) ——————————————————
+│   │   ├── session.py          # SessionStore: create/resume, JSON export (demoted; exporter owns writes)
+│   │   ├── orchestrator.py     # v1 deterministic driver (retire E5)
+│   │   ├── stage_machine.py    # STAGE_ORDER, ResearchPhase; re-exports research_policy (retire E5)
+│   │   ├── pipeline.py         # v1 _run_sync bridge (retire E5)
+│   │   ├── checkpoint.py       # v1 console CP flows; still imported by v1 shell (retire E5)
+│   │   ├── jsonio.py           # JSON retry + degrade for agent output
+│   │   ├── citation.py         # Semantic Scholar BFS (httpx, not MCP)
+│   │   └── agents/             # six specialist LlmAgents (Clarifier/Planner/Acquirer/Extractor/Verifier/Writer)
+│   ├── localgpt_research/      # ADK discovery shim: re-exports the resumable App + agent.json card
 │   ├── scripts/
-│   │   └── check_setup.py # Gate G2 probe — verifies Ollama + models
-│   └── tests/             # 14 passing tests (pytest, asyncio_mode=auto)
+│   │   └── check_setup.py      # Gate G2 probe — verifies Ollama + models
+│   └── tests/                  # 273 passing tests (pytest, asyncio_mode=auto)
 ├── mcp/
-│   └── Crawl4AI_MCP/      # FastMCP stdio server (fully implemented)
+│   └── Crawl4AI_MCP/           # FastMCP stdio server (fully implemented)
 │       ├── app/
 │       │   ├── server.py  # FastMCP entry; register_all() wires everything
 │       │   ├── common.py  # Single registration point for all tools
-│       │   ├── tools/     # discover, triage, crawl, deep_crawl, adaptive_crawl, search
+│       │   ├── tools/     # discover, triage, crawl, deep_crawl, adaptive_crawl, search, seed, dedup
 │       │   └── storage/   # sqlite_store.py + chroma_store.py (lazy singletons)
-│       └── tests/         # offline suite (crawl4ai mocked)
+│       └── tests/         # 43 passing tests (offline suite, crawl4ai mocked)
 ├── memory-bank/           # Project design docs (architecture, requirements, progress)
-└── claudedocs/            # Task hierarchy and workflow docs
+└── claudedocs/            # Task hierarchy, workflow docs, and E-series execution plans
 ```
 
 ## Commands
@@ -33,11 +55,17 @@ LocalGPT_Rebase/
 ### orchestrator package
 ```bash
 cd orchestrator
-uv sync                                  # install deps (pydantic, httpx, google-adk, etc.)
-uv run pytest tests/ -v                  # run all tests
+uv sync                                  # install deps (pydantic, httpx, google-adk[a2a], etc.)
+uv run pytest tests/ -v                  # run all tests (273 green)
 uv run pytest tests/test_schemas.py -v   # single test file
 python scripts/check_setup.py           # verify Ollama + model VRAM (Gate G2)
 uv run ruff check app/ tests/           # lint
+
+# Run the pipeline server (REST /run_sse + A2A on localhost:8001)
+uv run python -m app.server
+
+# Drive via REST CLI (interactive HITL)
+uv run python -m app.cli "your research query"
 ```
 
 ### mcp/Crawl4AI_MCP package
@@ -46,7 +74,7 @@ cd mcp/Crawl4AI_MCP
 uv sync
 uv run crawl4ai-setup                    # one-time: install Playwright browsers
 uv run python main.py                    # run MCP server over stdio
-uv run pytest tests/ -v                  # offline suite
+uv run pytest tests/ -v                  # offline suite (43 green)
 uv run python e2e_test.py               # live test (needs Ollama + network)
 ```
 
@@ -54,9 +82,9 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 
 **Goal**: one query → vetted markdown research report. **Google ADK 2.x + A2A protocol** orchestrates 6 specialized agents. All inference is local via Ollama.
 
-> **Design version:** the committed target is **v2** ([memory-bank/architecture.md], ratified 2026-06-23): ADK 2.x dynamic workflows, **ADK-owned sessions/resume**, a single **local-first A2A boundary**, served via `adk api_server`. Code today (Stories 1–5) still implements the **v1 hand-rolled orchestrator**; v1→v2 migration is architecture.md §15. The contracts, agents, policy, and MCP layer are unchanged between v1 and v2 — only the orchestration shell + session ownership change.
+> **Design version: v2 — implemented.** Target is **ADK 2.x dynamic workflows**, **ADK-owned sessions/resume**, **`RequestInput` HITL**, single **local-first A2A boundary** served via `app/server.py` (`get_fast_api_app(a2a=True)`). Migration steps E0–E4 are **committed to `dev`** (273 orchestrator + 43 MCP green, all 4 HARD GATES passed). Only **E5** remains: retire the v1 shell (`orchestrator.py` / `stage_machine.py` / `pipeline.py` / `checkpoint.py`). v1→v2 migration path: [architecture.md] §15. The contracts, agents, policy, and MCP layer are **unchanged** between v1 and v2 — only the orchestration shell + session ownership changed.
 
-**Data flow**: `Clarifier → Planner → [Acquirer → CP3? → Extractor → Verifier] loop → Writer`
+**Data flow**: `Clarifier → Planner →★CP1 → [Acquirer →★CP3? → Extractor → Verifier]* loop → Writer →★CP2`
 
 **Agent contracts** — agents hand off typed Pydantic artifacts, never raw text:
 - `ResearchPlan` (Planner → workflow)
@@ -64,33 +92,38 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 - `ClaimLedger` (Verifier → Writer) — contains `Claim` records with `temporal_status`, `confidence_score`, `conflict_type`
 - In v2 a node is invoked via `await ctx.run_node(agent, input)`, which returns the output directly — no throwaway `Runner`/session per call.
 
-**Orchestration (v2)**: an ADK **dynamic workflow** (`@node` / `Workflow` / `ctx.run_node`) is the control flow; deterministic Python (`stop_rule`, `depth_budget`, Verifier/Writer policy) decides control + policy, LLMs decide content. Replaces the v1 `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` bridge.
+**Orchestration (v2 — live)**: an ADK **dynamic workflow** (`@node` / `Workflow` / `ctx.run_node`) is the control flow; deterministic Python (`stop_rule`, `depth_budget`, Verifier/Writer policy) decides control + policy, LLMs decide content. The v2 shell in `workflow.py` / `adk_app.py` is the live driver; `orchestrator.py` + `stage_machine.py` + `pipeline.py` are the v1 remnants pending E5 retirement.
 
 **Model strategy**: one hot Qwen2.5-14B role-prompted per agent + resident `nomic-embed-text:latest`. ~12.5 GB VRAM total. 16 GB RAM is the binding constraint — stages are strictly sequential to prevent OOM. This is also *why* the six stay **local sub-agents/nodes, not A2A peers** (A2A overhead buys no concurrency on one hot model). Set the **`OLLAMA_API_BASE` env var** at startup (LiteLLM routes non-generation calls through it).
 
-**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`, built **once per run and reused** across loop passes (then `close()`d) — not rebuilt per phase. Only Acquirer/Extractor/Verifier hold MCP tools (least-privilege). MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents handoff page IDs, not text. **MCP stays the tool boundary; it is not migrated to A2A.**
+**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`, built **once per run and reused** across loop passes (then `close()`d in a `finally`) — not rebuilt per phase. Only Acquirer/Extractor/Verifier hold MCP tools (least-privilege). MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents handoff page IDs, not text. **MCP stays the tool boundary; it is not migrated to A2A.**
 
-**A2A boundary (v2, local-first)**: the whole pipeline is exposed as one `A2AServer` via `to_a2a(root_agent, port=8001)` or `adk api_server --a2a`, binding **localhost**. Consumed locally either by direct HTTP (`POST /run_sse`) or by another ADK agent via `RemoteA2aAgent(agent_card=…/.well-known/agent-card.json)`. Dep: `google-adk[a2a]`.
+**A2A boundary (v2 — live)**: the whole pipeline is exposed as one unified server via `get_fast_api_app(a2a=True)` in `app/server.py`, binding **localhost:8001**, serving both REST (`/run_sse`) and A2A (card + RPC). The agent card lives at `/a2a/localgpt_research/.well-known/agent-card.json`. ADK 2.3.0 has a `json`-shadow bug that 404s the auto-mounted card — `_mount_a2a` works around it (guarded no-op for future ADK). Consumed locally either by the thin `app/cli.py` or another ADK agent via `RemoteA2aAgent(agent_card=…/.well-known/agent-card.json, use_legacy=False)`. Dep: `google-adk[a2a]>=2.3,<3`.
 
-**Checkpoints** (human-in-loop, blocking — v2 via ADK `RequestInput`, resumable over api_server/SSE):
+**Session ownership (v2 — live)**: ADK's `DatabaseSessionService` (SQLite, `sqlite+aiosqlite`) owns session state + resume. `SessionExporterPlugin` (`on_event_callback` + `after_run_callback`) projects `v2_plan`/`v2_ledger`/`v2_draft` state-delta to `data/sessions/{id}/*.json` for inspection. `stage.json`-based resume is retired. Resume = pass the original `invocation_id` to the same `app.App`.
+
+**Checkpoints** (human-in-loop, blocking — `RequestInput` nodes, resumable over api_server/SSE):
 - CP1: after Planner, user approves/edits `ResearchPlan`
 - CP2: after Writer, user approves/edits draft
 - CP3: after Acquirer, before Extractor — only fires when `plan.depth == "deep"`
+- Reject = re-yield `RequestInput` (NOT raise — raising is terminal/non-resumable in ADK 2.3.0)
 
 **Stages** (shared vocabulary + resume/observability anchors; in v2 they are positions in the workflow graph, not a hand-walked enum):
 `INTAKE → CLARIFY → PLAN → [ACQUIRE → MID_ACQUIRE(CP3) → EXTRACT → VERIFY] → SYNTHESIZE → WRITE → DONE`
 
 ## Key Patterns
 
-**Schemas are frozen contracts** (`orchestrator/app/schemas.py`). Agents are coded against them. Gate G1 requires all new optional fields added before Story 2 agents start (T0.4 — add `publication_date: date | None = None`, `citation_refs: list[str] = []` to `ScoredURL`; `temporal_status` to `Claim`; `confidence_score` + `conflict_type` to contradiction records). All additions must be optional with defaults to keep 14 existing tests green.
+**Schemas are frozen contracts** (`orchestrator/app/schemas.py`). Agents are coded against them. All optional fields have defaults so existing tests stay green.
 
 **Config** is a singleton dataclass (`config = Config()` at module bottom). New settings go there as `field(default_factory=lambda: _env(...))` — never hardcoded in agent logic.
 
-**Session artifacts** live in `data/sessions/{id}/` as JSON files. **v1 (current):** `SessionStore` is the source of truth + resume engine (orchestrator reads `stage.json`, skips completed stages). **v2 (target):** ADK's session + event store owns state and resume (`App(resumability_config=ResumabilityConfig(is_resumable=True))`, resume by `invocation_id`); `data/sessions/*.json` is demoted to a **write-through export** (via an after-node callback/plugin) for inspection/diffing — `stage.json`-based resume is retired (architecture.md §5).
+**Session artifacts** live in `data/sessions/{id}/` as JSON files — **written by `SessionExporterPlugin` as a write-through export** (not the resume source). ADK's `DatabaseSessionService` at `data/sessions.db` is the source of truth for resume. Final report writes to `data/reports/{id}.md`.
+
+**research_policy.py is the shared policy source** — `stop_rule`, `depth_budget`, `merge_ledger` live here (pure, config+schemas-only imports). `stage_machine.py` re-exports them for the v1 shell; both share one implementation.
 
 **Independence test** (Verifier): two sources are independent iff different `etld1` AND content cosine < `INDEPENDENCE_COSINE_THRESHOLD` (default 0.92). This threshold needs tuning against a labelled mirror set.
 
-**Semantic Scholar citation BFS** (T1.6, planned): `orchestrator/app/citation.py`, httpx async utility. NOT an MCP tool. Called directly by Acquirer for `depth=deep` academic sources. 2-hop BFS, relevance-gated by LLM score ≥ 0.7.
+**Semantic Scholar citation BFS** (`orchestrator/app/citation.py`): httpx async utility, NOT an MCP tool. Called directly by Acquirer for `depth=deep` academic sources. 2-hop BFS, relevance-gated by LLM score ≥ 0.7.
 
 ## MCP Tool Registration
 
@@ -98,8 +131,11 @@ To add a new MCP tool: implement it in `mcp/Crawl4AI_MCP/app/tools/`, then regis
 
 ## Design Docs
 
-- `memory-bank/architecture.md` — agent roles, stage machine, data flow, citation BFS design, contradiction confidence scoring
+- `memory-bank/architecture.md` — agent roles, data flow, v2 ADK substrate, A2A topology, §15 migration status
 - `memory-bank/requirements.md` — FR/NFR/AC (acceptance criteria AC1–AC7)
 - `memory-bank/progress.md` — what's built, what's next, decision log
 - `claudedocs/spawn_a2a_research.md` — story-by-story task breakdown with gates
 - `claudedocs/workflow_a2a_research.md` — full task list with dependency graph and critical path
+- `claudedocs/spawn_v1_to_v2_migration.md` — E-series execution log (E0–E4 done; E5 next)
+- `claudedocs/workflow_v1_to_v2_migration.md` — P-series workflow with dependency graph (P0–P7)
+- `claudedocs/E4_execution_plan.md` — A2A exposure execution plan (latest E-series)
