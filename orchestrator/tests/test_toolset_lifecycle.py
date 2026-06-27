@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from google.adk.workflow import node
 
-from app import pipeline
 from app.agents import acquirer, extractor, verifier
 from app.schemas import (
     Claim,
@@ -53,56 +52,6 @@ class _FakeToolset:
 
     async def close(self) -> None:
         self.closed += 1
-
-
-async def _noop_drive(_agent, _app_name, _text, _output_key) -> str:
-    return ""
-
-
-# ── Extractor path ───────────────────────────────────────────────────────────
-async def test_drive_extractor_closes_owned_toolset(monkeypatch):
-    fake = _FakeToolset()
-    monkeypatch.setattr(extractor, "_build_default_toolset", lambda: fake)
-    monkeypatch.setattr(extractor, "build_extractor", lambda _ts: object())
-    monkeypatch.setattr(pipeline, "_drive", _noop_drive)
-
-    await pipeline._drive_extractor([], None)
-
-    assert fake.closed == 1
-
-
-async def test_drive_extractor_leaves_injected_toolset_open(monkeypatch):
-    fake = _FakeToolset()
-    monkeypatch.setattr(extractor, "build_extractor", lambda _ts: object())
-    monkeypatch.setattr(pipeline, "_drive", _noop_drive)
-
-    await pipeline._drive_extractor([], fake)
-
-    assert fake.closed == 0
-
-
-# ── Verifier path ────────────────────────────────────────────────────────────
-async def test_verify_runner_closes_owned_toolset(monkeypatch):
-    fake = _FakeToolset()
-    monkeypatch.setattr(verifier, "_build_default_toolset", lambda: fake)
-    monkeypatch.setattr(verifier, "build_verifier", lambda *, toolset: object())
-    monkeypatch.setattr(pipeline, "_drive", _noop_drive)
-
-    runner = pipeline._make_default_verify_runner(None)
-    await runner("payload")
-
-    assert fake.closed == 1
-
-
-async def test_verify_runner_leaves_injected_toolset_open(monkeypatch):
-    fake = _FakeToolset()
-    monkeypatch.setattr(verifier, "build_verifier", lambda *, toolset: object())
-    monkeypatch.setattr(pipeline, "_drive", _noop_drive)
-
-    runner = pipeline._make_default_verify_runner(fake)
-    await runner("payload")
-
-    assert fake.closed == 0
 
 
 # ── v2 node-path lifecycle (E2.S2 T4): toolset built once / closed once ────────
