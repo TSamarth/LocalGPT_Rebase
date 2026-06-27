@@ -47,3 +47,38 @@ async def test_a2a_agent_card_published(server_app):
     assert card.get("name")
     assert card.get("url")
     assert card.get("skills")
+
+
+# The A2A extension URI ADK 2.3.0 uses to signal the new (use_legacy=False)
+# A2aAgentExecutor — verified against the installed source
+# (google.adk.a2a.agent.interceptors.new_integration_extension) and the adk-docs
+# A2A-extension page.
+_A2A_NEW_EXECUTOR_EXTENSION = "https://google.github.io/adk-docs/a2a/a2a-extension/"
+
+
+async def test_a2a_card_content_modes_and_extension(server_app):
+    """E4.T2 — served card locks input/output modes, a skill, and the A2A extension.
+
+    The pipeline returns a markdown draft, so ``defaultOutputModes`` must be
+    ``text/markdown``; ``defaultInputModes`` stays ``text/plain``. The new-executor
+    A2A extension must be advertised under ``capabilities.extensions`` so
+    ``use_legacy=False`` clients get routed to the new ``A2aAgentExecutor``.
+    """
+    transport = httpx.ASGITransport(app=server_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://localhost:8001"
+    ) as client:
+        resp = await client.get(
+            "/a2a/localgpt_research/.well-known/agent-card.json"
+        )
+    assert resp.status_code == 200
+    card = resp.json()
+
+    assert card["defaultInputModes"] == ["text/plain"]
+    assert card["defaultOutputModes"] == ["text/markdown"]
+    assert len(card.get("skills", [])) >= 1
+
+    extension_uris = {
+        ext.get("uri") for ext in card.get("capabilities", {}).get("extensions", [])
+    }
+    assert _A2A_NEW_EXECUTOR_EXTENSION in extension_uris
