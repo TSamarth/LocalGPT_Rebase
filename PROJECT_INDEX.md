@@ -1,6 +1,6 @@
 # Project Index: LocalGPT_Rebase (A2A Deep Research)
 
-Generated: 2026-06-29
+Generated: 2026-06-30
 
 **Goal**: one query → vetted markdown research report. Google ADK + A2A protocol orchestrates 6 specialized agents. All inference local via Ollama. Web acquisition via crawl4ai MCP server.
 
@@ -29,8 +29,14 @@ LocalGPT_Rebase/
 │   │   └── llm.py             # LiteLlm backend → local Ollama
 │   ├── localgpt_research/     # re-export package for `adk` CLI discovery (agent.json)
 │   ├── scripts/check_setup.py # Gate G2 probe — verifies Ollama + models/VRAM
+│   ├── scripts/acceptance_runbook.md # E5.S2 live acceptance runbook (T1–T4)
+│   ├── scripts/mem_probe.py           # OOM/VRAM budget probe — samples RSS + ollama ps
 │   ├── main.py                # in-process entry: drives v2 workflow, answers CP pauses
-│   └── tests/                 # 23 test files (pytest, asyncio_mode=auto)
+│   └── tests/                 # 26+ test files (pytest, asyncio_mode=auto)
+│       ├── eval/              # eval harness: metrics.py, fixtures/seeded_sources.py, 6 AC datasets
+│       ├── test_live_acceptance.py   # T1: AC1–AC7 live acceptance (marker: live)
+│       ├── test_live_resume.py       # T2: cross-process resume live (marker: live)
+│       └── test_live_a2a_roundtrip.py# T3: A2A card + HITL round-trip live (marker: live)
 ├── mcp/Crawl4AI_MCP/          # FastMCP stdio server (own pyproject + .venv)
 │   ├── app/
 │   │   ├── server.py          # FastMCP entry; register_all() wires everything
@@ -54,7 +60,10 @@ LocalGPT_Rebase/
 - **REST CLI**: `orchestrator/app/cli.py` — `run_cli()` drives a run over HTTP against `app/server.py`
 - **MCP server**: `mcp/Crawl4AI_MCP/main.py` — FastMCP over stdio (subprocess attached via ADK MCPToolset)
 - **Setup gate**: `orchestrator/scripts/check_setup.py` — Gate G2, verifies Ollama + model VRAM
-- **Tests**: `orchestrator/tests/` (23 files), `mcp/Crawl4AI_MCP/tests/` (7 files)
+- **Memory/VRAM probe**: `orchestrator/scripts/mem_probe.py` — T4: samples RSS + `ollama ps`; exit 0 iff RAM<16GB & VRAM<14GB
+- **Tests**: `orchestrator/tests/` (26+ files), `mcp/Crawl4AI_MCP/tests/` (7 files)
+- **Live tests** (opt-in, `-m live`): `test_live_acceptance.py` (AC1–AC7), `test_live_resume.py` (T2), `test_live_a2a_roundtrip.py` (T3)
+- **Acceptance runbook**: `orchestrator/scripts/acceptance_runbook.md` — step-by-step T1–T4 with evidence table
 
 ## 🔄 Data Flow
 
@@ -109,6 +118,12 @@ Module-level `app` symbol — ADK CLI convention. Import offline-safe (LiteLlm l
 ### orchestrator/app/agents/ — the 6 ADK LlmAgents
 `build_clarifier`, `build_planner`, `build_acquirer`, `build_extractor`, `build_verifier`, `build_writer`. Called via `ctx.run_node()` in workflow. Only Acquirer + Extractor hold MCP toolsets (opened once per workflow pass, closed in `finally`).
 
+### orchestrator/tests/eval/ — eval harness
+`metrics.py` — deterministic AC graders (`grade_ac1` … `grade_ac7`) operating on `ClaimLedger` + rendered markdown. `fixtures/seeded_sources.py` — `ScoredURL[]` corpus for AC4/AC5/AC7 injection. `datasets/` — 6 JSON test datasets (one per AC). Used by `test_live_acceptance.py` T1.
+
+### orchestrator/scripts/mem_probe.py — VRAM/RAM probe (T4)
+Wraps a child process, samples RSS every 2 s, calls `ollama ps` on exit. Thresholds: RAM < 16 GB, VRAM < 14 GB. Exit 0 = both pass.
+
 ### mcp/Crawl4AI_MCP/app/tools/ — MCP tools
 discover, triage, crawl, deep_crawl, adaptive_crawl, search, seed, dedup.
 Register new tools in `app/common.py` via `mcp.tool()` — no scattered decorators.
@@ -130,10 +145,11 @@ SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents hand o
 
 ## 🧪 Tests
 
-- orchestrator: **23 test files** — test_schemas, _session, _workflow, _research_policy, _cp3_adapter, _citation, _jsonio, _llm, _session_exporter (+ E3/E4 integration: _a2a_hitl_gate, _server, _cli, _a2a_client_example, _a2a_roundtrip, _toolset_lifecycle + 6 agent tests)
+- orchestrator: **26+ test files** — test_schemas, _session, _workflow, _research_policy, _cp3_adapter, _citation, _jsonio, _llm, _session_exporter (+ E3/E4 integration: _a2a_hitl_gate, _server, _cli, _a2a_client_example, _a2a_roundtrip, _toolset_lifecycle + 6 agent tests + 3 live tests)
+- eval harness: `tests/eval/` — `metrics.py`, `fixtures/seeded_sources.py`, 6 AC JSON datasets (ac1–ac5, ac7)
 - mcp: 7 test files (test_crawl, _deep_crawl, _discover, _search, _storage, _triage, _story2)
-- **231 orchestrator** (230 green offline + 1 needs live Ollama) + **43 MCP** green
-- Run: `cd <pkg> && uv run pytest tests/ -v`
+- **232+ orchestrator offline** + **43 MCP** green; live tests opt-in via `-m live` (require Ollama running)
+- Run: `cd <pkg> && uv run pytest tests/ -v` (offline); `uv run pytest -m live tests/test_live_acceptance.py -v` (live)
 
 ## 🧠 Model Strategy
 
