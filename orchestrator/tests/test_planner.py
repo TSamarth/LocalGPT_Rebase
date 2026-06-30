@@ -63,7 +63,10 @@ def _expected_target(depth: Depth) -> int:
 
 # ── build_planner ─────────────────────────────────────────────────────────────
 def test_build_planner_is_reasoning_only_with_schema():
-    agent = build_planner()
+    # Pass a stub model to avoid LiteLlm construction (which spawns aiosqlite
+    # background threads via litellm's internal cache, causing
+    # PytestUnhandledThreadExceptionWarning when the event loop closes).
+    agent = build_planner(model="stub-model")
     assert agent.output_schema is ResearchPlan
     assert agent.output_key == OUTPUT_KEY
     assert isinstance(agent.instruction, str) and agent.instruction.strip()
@@ -72,7 +75,7 @@ def test_build_planner_is_reasoning_only_with_schema():
 
 
 def test_build_planner_prompt_mentions_core_responsibilities():
-    instruction = build_planner().instruction.lower()
+    instruction = build_planner(model="stub-model").instruction.lower()
     for token in ("subtopic", "depth", "shallow", "normal", "deep", "target_evidence"):
         assert token in instruction
 

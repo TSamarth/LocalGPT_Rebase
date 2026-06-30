@@ -129,7 +129,20 @@ async def _stream_run(
     new_message: types.Content,
     invocation_id: str | None,
 ):
-    """POST to /run_sse and yield each parsed Event."""
+    """POST to /run_sse and yield each parsed Event.
+
+    Detects ADK server-side error events (``{"error": "..."}`` JSON with a
+    single ``error`` key) and raises them as ``RuntimeError`` instead of
+    silently swallowing them.  ADK's ``api_server.py`` event_generator wraps
+    any exception it catches as ``data: {"error": "<msg>"}`` and closes the
+    stream.  Without this check, ``Event.model_validate_json`` parses the
+    error payload as an empty ``Event`` (``extra='ignore'`` drops unknown
+    fields), the driver sees no ``RequestInput`` checkpoint, ``pending`` stays
+    ``None``, the outer loop breaks, and the caller gets a misleading
+    ``AssertionError`` ("CP2 not observed") instead of the real server error.
+    """
+    import json as _json
+
     body: dict[str, Any] = {
         "app_name": app_name,
         "user_id": user_id,
@@ -142,8 +155,19 @@ async def _stream_run(
     async with client.stream("POST", "/run_sse", json=body) as resp:
         resp.raise_for_status()
         async for line in resp.aiter_lines():
-            if line.startswith("data:"):
-                yield Event.model_validate_json(line[len("data:"):].strip())
+            if not line.startswith("data:"):
+                continue
+            raw = line[len("data:"):].strip()
+            if not raw:
+                continue
+            # Detect ADK server error events before parsing as Event.
+            try:
+                parsed = _json.loads(raw)
+            except _json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and list(parsed) == ["error"]:
+                raise RuntimeError(f"Server pipeline error: {parsed['error']}")
+            yield Event.model_validate_json(raw)
 
 
 def _extract_request_input(event: Event) -> tuple[str, Any, str | None] | None:

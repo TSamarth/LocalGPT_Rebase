@@ -47,11 +47,18 @@ _AGENT_CARD_PATH = _ORCH_DIR / APP_NAME / "agent.json"
 
 
 def build_server() -> FastAPI:
-    """Construct the unified REST + A2A FastAPI app bound to the local DB."""
+    """Construct the unified REST + A2A FastAPI app bound to the local DB.
+
+    ADK 2.3.0 fix: pass ``a2a=False`` so ADK never enters the buggy A2A setup
+    block (function-local ``import json`` at the bottom of ``get_fast_api_app``
+    shadows the module-level import, causing ``UnboundLocalError`` when
+    ``json.load(f)`` is called inside the A2A loop).  ``_mount_a2a`` below
+    performs the correct A2A wiring directly.
+    """
     server_app = get_fast_api_app(
         agents_dir=AGENTS_DIR,
         session_service_uri=config.SESSION_DB_URL,
-        a2a=True,
+        a2a=False,
         host=HOST,
         port=PORT,
         web=False,
@@ -120,6 +127,11 @@ def _mount_a2a(server_app: FastAPI) -> None:
             _cache["runner"] = build_runner(research_app)
         return _cache["runner"]
 
+    if not _AGENT_CARD_PATH.exists():
+        raise FileNotFoundError(
+            f"A2A agent card not found: {_AGENT_CARD_PATH}. "
+            "Create localgpt_research/agent.json before starting the server."
+        )
     agent_card = AgentCard(
         **json.loads(_AGENT_CARD_PATH.read_text(encoding="utf-8"))
     )
