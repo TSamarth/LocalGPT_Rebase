@@ -25,7 +25,7 @@ async def get_status() -> str:
     # Ollama ping
     ollama_ok = False
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
+        async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(config.OLLAMA_BASE_URL)
             ollama_ok = resp.status_code < 500
     except Exception:

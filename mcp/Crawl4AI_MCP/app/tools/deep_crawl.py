@@ -111,7 +111,7 @@ async def deep_crawl(
         extraction_strategy=extraction_strategy,
     )
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True)
+    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True,verbose=False)
 
     # BFS state
     queue: deque = deque([(seed_url, 0)])

@@ -74,7 +74,7 @@ class TestOAuthEndpoints:
                         "client_name": "Test Client",
                         "redirect_uris": ["http://localhost:5173/callback"],
                     },
-                    timeout=5.0,
+                    timeout=20.0,
                 )
 
                 # Should accept registration

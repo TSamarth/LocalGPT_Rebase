@@ -59,7 +59,7 @@ async def adaptive_crawl(
             f"(target confidence={target_confidence})"
         )
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True)
+    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True,verbose=False)
 
     crawled_urls: List[str] = []
     aggregated_fit_markdown: List[str] = []

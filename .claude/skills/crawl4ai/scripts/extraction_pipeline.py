@@ -40,7 +40,7 @@ async def generate_schema(url: str, instruction: str, output_file: str = "genera
     """
     print("🔍 Generating extraction schema using LLM...")
 
-    browser_config = BrowserConfig(headless=True)
+    browser_config = BrowserConfig(headless=True, verbose=False)
 
     # Use LLM to analyze the page structure and generate schema
     extraction_strategy = LLMExtractionStrategy(
@@ -230,7 +230,7 @@ async def extract_with_llm(url: str, instruction: str):
     """
     print("🤖 Using direct LLM extraction...")
 
-    browser_config = BrowserConfig(headless=True)
+    browser_config = BrowserConfig(headless=True, verbose=False)
 
     extraction_strategy = LLMExtractionStrategy(
         provider="openai/gpt-4o-mini",  # Can change to ollama/llama3, anthropic/claude, etc.

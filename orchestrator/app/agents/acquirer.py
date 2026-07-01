@@ -91,6 +91,8 @@ Rules:
   same URL, keep one record and list the extra sources in `also_in`.
 - Do not fabricate scores or strategies — use what the triage tool returns.
 - Output ONLY the JSON array of ScoredURL records and nothing else.
+- CRITICAL: If a tool fails or returns no results, output an empty JSON array: []
+- CRITICAL: Never output prose, markdown fences, or explanations — raw JSON only.
 """
 
 
@@ -123,6 +125,7 @@ def parse_scored_urls(raw: Union[str, list, dict, ScoredURL]) -> list[ScoredURL]
     single mapping, or already-built ``ScoredURL`` instances — so callers can hand
     back whatever the runner produced. Returns validated ``ScoredURL`` records.
     """
+    print(f"Raw: {raw}")
     if isinstance(raw, str):
         raw = loads_first_json(raw)
     if isinstance(raw, ScoredURL):
@@ -230,14 +233,20 @@ def _build_default_toolset() -> BaseToolset:
     from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
     from mcp import StdioServerParameters
 
-    server_cwd = str(Path(config.MCP_SERVER_CWD).resolve())
+    server_cwd_path = Path(config.MCP_SERVER_CWD).resolve()
+    server_cwd = str(server_cwd_path)
+    # Use the venv python directly to avoid `uv run` startup overhead (~2-4 s on
+    # Windows), which causes the default 5 s StdioConnectionParams timeout to fire
+    # before the MCP server finishes initializing inside the uvicorn event loop.
+    venv_python = str(server_cwd_path / ".venv" / "Scripts" / "python.exe")
     return MCPToolset(
         connection_params=StdioConnectionParams(
             server_params=StdioServerParameters(
-                command="uv",
-                args=["run", "python", "main.py"],
+                command=venv_python,
+                args=["main.py"],
                 cwd=server_cwd,
             ),
+            timeout=500.0,
         ),
         tool_filter=list(ACQUIRER_TOOL_NAMES),
     )

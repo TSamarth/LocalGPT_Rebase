@@ -44,6 +44,7 @@ def build_model(model_name: Optional[str] = None) -> LiteLlm:
         model=ollama_model_str(model_name or config.REASONING_MODEL),
         api_base=config.OLLAMA_BASE_URL,
         num_ctx=config.MODEL_CONTEXT_TOKENS,
+        num_predict=config.MODEL_MAX_OUTPUT_TOKENS,
         keep_alive=config.MODEL_KEEP_ALIVE,
         drop_params=True,
     )

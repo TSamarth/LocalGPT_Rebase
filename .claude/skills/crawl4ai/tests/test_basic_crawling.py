@@ -16,7 +16,8 @@ async def test_basic_crawl():
         headless=True,
         viewport_width=1920,
         viewport_height=1080,
-        user_agent="custom-agent"
+        user_agent="custom-agent",
+        verbose=False
     )
 
     crawler_config = CrawlerRunConfig(

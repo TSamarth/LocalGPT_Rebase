@@ -29,6 +29,7 @@ from typing import Awaitable, Callable, Optional
 
 from google.adk.agents import LlmAgent
 
+from ..jsonio import invoke_json_with_retry
 from ..llm import build_agent
 from ..schemas import ClarifyResult
 
@@ -229,7 +230,13 @@ async def _run_live(query: str) -> ClarifyResult:
     """Live path: drive the Clarifier agent through an ADK ``InMemoryRunner`` and
     read the structured ``ClarifyResult`` ADK writes to session state under
     ``OUTPUT_KEY``. Imported lazily so the offline/test path never needs a
-    running Ollama or the heavier runner machinery."""
+    running Ollama or the heavier runner machinery.
+
+    Wrapped in :func:`invoke_json_with_retry` — a small local model occasionally
+    truncates or garbles the JSON it must emit; one bounded corrective re-ask
+    (:data:`app.jsonio.JSON_ONLY_REASK`) turns that into a self-healing retry
+    instead of a hard crash.
+    """
     from google.adk.runners import InMemoryRunner
     from google.genai import types
 
@@ -242,21 +249,25 @@ async def _run_live(query: str) -> ClarifyResult:
     session = await runner.session_service.create_session(
         app_name=config.APP_NAME, user_id=user_id
     )
-    message = types.Content(role="user", parts=[types.Part(text=query)])
 
-    async for _ in runner.run_async(
-        user_id=user_id, session_id=session.id, new_message=message
-    ):
-        pass  # drain events; the agent writes its output to session state
+    async def _call(prompt: str) -> str:
+        message = types.Content(role="user", parts=[types.Part(text=prompt)])
+        async for _ in runner.run_async(
+            user_id=user_id, session_id=session.id, new_message=message
+        ):
+            pass  # drain events; the agent writes its output to session state
 
-    state = (
-        await runner.session_service.get_session(
-            app_name=config.APP_NAME, user_id=user_id, session_id=session.id
-        )
-    ).state
-    raw = state.get(OUTPUT_KEY)
-    if raw is None:
-        raise RuntimeError(
-            f"clarifier produced no output under state key {OUTPUT_KEY!r}"
-        )
+        state = (
+            await runner.session_service.get_session(
+                app_name=config.APP_NAME, user_id=user_id, session_id=session.id
+            )
+        ).state
+        raw = state.get(OUTPUT_KEY)
+        if raw is None:
+            raise RuntimeError(
+                f"clarifier produced no output under state key {OUTPUT_KEY!r}"
+            )
+        return raw
+
+    raw = await invoke_json_with_retry(_call, query)
     return parse_clarify_result(raw)

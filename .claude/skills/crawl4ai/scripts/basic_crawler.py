@@ -27,7 +27,8 @@ async def crawl_basic(url: str):
     browser_config = BrowserConfig(
         headless=True,
         viewport_width=1920,
-        viewport_height=1080
+        viewport_height=1080,
+        verbose=False
     )
 
     # Configure crawler

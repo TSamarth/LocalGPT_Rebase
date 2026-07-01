@@ -57,6 +57,12 @@ class Config:
     MODEL_KEEP_ALIVE: int = field(
         default_factory=lambda: _env_int("MODEL_KEEP_ALIVE", -1)
     )
+    # Max output tokens per generation (Ollama num_predict). Unset, Ollama's own
+    # default can cut a structured-JSON response off mid-value; bound it generously
+    # so Clarifier/Planner/Writer JSON always has room to close.
+    MODEL_MAX_OUTPUT_TOKENS: int = field(
+        default_factory=lambda: _env_int("MODEL_MAX_OUTPUT_TOKENS", 4096)
+    )
 
     # ── crawl4ai MCP server (stdio subprocess) ─────────────────────────────────
     # Path to the MCP package launched via ADK MCPToolset.

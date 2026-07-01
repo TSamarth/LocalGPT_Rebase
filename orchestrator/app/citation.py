@@ -173,7 +173,7 @@ class CitationClient:
     # ── lifecycle ─────────────────────────────────────────────────────────────
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+            self._client = httpx.AsyncClient(timeout=500.0, follow_redirects=True)
             self._owns_client = True
         return self._client
 

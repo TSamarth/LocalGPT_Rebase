@@ -418,7 +418,7 @@ async def crawl_url(
         # PDF/arXiv: route through the PDF processor for faithful text extraction.
         result = await crawl_with_retry(lambda: _crawl_pdf(url), ctx=ctx)
     else:
-        browser_cfg = BrowserConfig(headless=True, text_mode=not take_screenshot, light_mode=True)
+        browser_cfg = BrowserConfig(headless=True, text_mode=not take_screenshot, light_mode=True, verbose=False)
         run_cfg = _build_run_config(
             query=query,
             css_selector=css_selector,
@@ -486,7 +486,7 @@ async def crawl_many(
 
     effective_concurrent = min(max_concurrent, config.MAX_CONCURRENT_CRAWLS)
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True)
+    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True, verbose=False)
     run_cfg = _build_run_config(query=query, cache_mode_str=cache_mode, use_llm_extraction=llm_extract)
 
     dispatcher = MemoryAdaptiveDispatcher(

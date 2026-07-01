@@ -31,6 +31,7 @@ from typing import Awaitable, Callable, Optional, Union
 from google.adk.agents import LlmAgent
 
 from ..config import config
+from ..jsonio import invoke_json_with_retry
 from ..llm import build_agent
 from ..schemas import Depth, ResearchPlan
 
@@ -155,6 +156,11 @@ async def _default_runner(normalized_query: str) -> str:
     Built lazily and only used when no ``runner`` is injected, so importing this
     module (and unit-testing it) never requires a running Ollama. Returns the raw
     JSON text the agent emitted under ``OUTPUT_KEY``.
+
+    Wrapped in :func:`invoke_json_with_retry` — a small local model occasionally
+    truncates or garbles the JSON it must emit; one bounded corrective re-ask
+    (:data:`app.jsonio.JSON_ONLY_REASK`) turns that into a self-healing retry
+    instead of a hard crash.
     """
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -167,26 +173,29 @@ async def _default_runner(normalized_query: str) -> str:
     )
     runner = Runner(agent=agent, app_name=AGENT_NAME, session_service=session_service)
 
-    message = types.Content(role="user", parts=[types.Part(text=normalized_query)])
-    final_text = ""
-    for event in runner.run(
-        user_id="orchestrator", session_id="plan", new_message=message
-    ):
-        if event.is_final_response() and event.content and event.content.parts:
-            final_text = "".join(p.text or "" for p in event.content.parts)
+    async def _call(prompt: str) -> str:
+        message = types.Content(role="user", parts=[types.Part(text=prompt)])
+        final_text = ""
+        for event in runner.run(
+            user_id="orchestrator", session_id="plan", new_message=message
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                final_text = "".join(p.text or "" for p in event.content.parts)
 
-    # ADK may return the structured object under output_key in session state;
-    # fall back to that if the final text wasn't plain JSON.
-    session = await session_service.get_session(
-        app_name=AGENT_NAME, user_id="orchestrator", session_id="plan"
-    )
-    if session is not None:
-        stored = session.state.get(OUTPUT_KEY)
-        if isinstance(stored, dict):
-            return json.dumps(stored)
-        if isinstance(stored, str) and stored.strip():
-            return stored
-    return final_text
+        # ADK may return the structured object under output_key in session state;
+        # fall back to that if the final text wasn't plain JSON.
+        session = await session_service.get_session(
+            app_name=AGENT_NAME, user_id="orchestrator", session_id="plan"
+        )
+        if session is not None:
+            stored = session.state.get(OUTPUT_KEY)
+            if isinstance(stored, dict):
+                return json.dumps(stored)
+            if isinstance(stored, str) and stored.strip():
+                return stored
+        return final_text
+
+    return await invoke_json_with_retry(_call, normalized_query)
 
 
 async def plan(normalized_query: str, *, runner: Optional[PlannerRunner] = None) -> ResearchPlan:
@@ -197,7 +206,8 @@ async def plan(normalized_query: str, *, runner: Optional[PlannerRunner] = None)
 
     ``runner`` is injectable: pass an async callable ``(query) -> str | dict`` to
     run offline against canned output (unit tests, replay). When omitted, the
-    default runner drives the real agent through ADK + Ollama.
+    default runner drives the real agent through ADK + Ollama (self-healing on
+    bad JSON via :func:`_default_runner`).
     """
     invoke = runner or _default_runner
     raw = await invoke(normalized_query)

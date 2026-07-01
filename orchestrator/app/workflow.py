@@ -440,9 +440,12 @@ def build_research_workflow(
                             "depth": approved.depth.value,
                         }
                     )
-                    urls = acquirer_mod.parse_scored_urls(
-                        await ctx.run_node(acquirer, acquire_payload)
-                    )
+                    try:
+                        urls = acquirer_mod.parse_scored_urls(
+                            await ctx.run_node(acquirer, acquire_payload)
+                        )
+                    except ValueError:
+                        urls = []
 
                     # ── CP3 (E3.S1 T2): real deep-only RequestInput checkpoint ─
                     # The seam between acquire and extract. Gated on
@@ -485,9 +488,12 @@ def build_research_workflow(
                         # only when supplemental) so ADK execution-IDs stay aligned
                         # on resume; the merged list is what feeds extract.
                         if needs_supplemental:
-                            supplemental = acquirer_mod.parse_scored_urls(
-                                await ctx.run_node(acquirer, acquire_payload)
-                            )
+                            try:
+                                supplemental = acquirer_mod.parse_scored_urls(
+                                    await ctx.run_node(acquirer, acquire_payload)
+                                )
+                            except ValueError:
+                                supplemental = []
                             urls = urls + supplemental
 
                     # Extract crawls into ChromaDB; page-ids are discarded (as v1).
@@ -499,9 +505,17 @@ def build_research_workflow(
                     # The node path calls the verifier agent directly, which does
                     # NOT auto-enrich — so re-apply ``enrich_ledger`` to match v1's
                     # status/confidence recompute (v1 ``verify`` always re-enriches).
-                    new = verifier_mod.enrich_ledger(
-                        verifier_mod.parse_ledger(await ctx.run_node(verifier, subtopic.question))
-                    )
+                    # Guard: MCP search_chunks timeout leaves the tool-agent with no
+                    # JSON to return (no output_schema in tool mode). Mirror the same
+                    # try/except that verifier.verify() uses (verifier.py:563-569).
+                    try:
+                        new = verifier_mod.enrich_ledger(
+                            verifier_mod.parse_ledger(
+                                await ctx.run_node(verifier, subtopic.question)
+                            )
+                        )
+                    except ValueError:
+                        new = ClaimLedger(claims=[])
                     ledger = merge_ledger(ledger, new)
                     # ── E3.S2 T1: emit accumulated ledger into ADK session state
                     yield Event(state={"v2_ledger": ledger.model_dump(mode="json")})

@@ -39,7 +39,8 @@ async def test_proxy_config():
             "server": "http://proxy.example.com:8080",
             "username": "user",
             "password": "pass"
-        }
+        },
+        verbose=False
     )
 
     print("✅ Proxy config structure correct (in BrowserConfig)")

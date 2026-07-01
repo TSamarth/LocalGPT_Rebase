@@ -110,14 +110,17 @@ def _build_default_toolset() -> BaseToolset:
     from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
     from mcp import StdioServerParameters
 
-    server_cwd = str(Path(config.MCP_SERVER_CWD).resolve())
+    server_cwd_path = Path(config.MCP_SERVER_CWD).resolve()
+    server_cwd = str(server_cwd_path)
+    venv_python = str(server_cwd_path / ".venv" / "Scripts" / "python.exe")
     return MCPToolset(
         connection_params=StdioConnectionParams(
             server_params=StdioServerParameters(
-                command="uv",
-                args=["run", "python", "main.py"],
+                command=venv_python,
+                args=["main.py"],
                 cwd=server_cwd,
             ),
+            timeout=500.0,
         ),
         tool_filter=list(STRATEGY_TOOL_NAMES.values()),
     )

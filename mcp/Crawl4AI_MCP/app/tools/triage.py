@@ -73,7 +73,7 @@ async def score_and_triage_urls(
     if ctx:
         await ctx.info(f"Triaging {len(urls)} URLs for query: '{query}'")
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True)
+    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True, verbose=False)
 
     link_preview_cfg = LinkPreviewConfig(
         verbose=False,
@@ -83,7 +83,7 @@ async def score_and_triage_urls(
         include_patterns=include_patterns or [],
         exclude_patterns=exclude_patterns or [],
         concurrency=concurrency,
-        timeout=8,
+        timeout=15,
         query=query,
         score_threshold=0.0,  # We apply our own threshold after
     )
