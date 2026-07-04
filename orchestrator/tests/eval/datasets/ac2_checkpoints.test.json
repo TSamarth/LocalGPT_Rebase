@@ -1,0 +1,6 @@
+{
+  "description": "AC2 — CP1 and CP2 both block on adk_request_input",
+  "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+  "expected_checkpoints": ["CP1", "CP2"],
+  "note": "A run with stubs for acquirer/extractor/verifier/writer must still pause at CP1 (plan approval) and CP2 (draft approval). Both must appear as RequestInput events before the terminal output."
+}

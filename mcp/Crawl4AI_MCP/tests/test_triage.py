@@ -1,6 +1,7 @@
 """Tests for score_and_triage_urls tool."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,13 +36,14 @@ async def test_triage_returns_qualified_disqualified(client):
     """Triage result should have qualified_urls and disqualified_urls keys."""
     mock_result = _mock_triage_result("https://example.com")
 
-    with patch("app.tools.triage.AsyncWebCrawler") as MockCrawler:
-        instance = AsyncMock()
-        instance.arun = AsyncMock(return_value=mock_result)
-        instance.__aenter__ = AsyncMock(return_value=instance)
-        instance.__aexit__ = AsyncMock(return_value=None)
-        MockCrawler.return_value = instance
+    instance = AsyncMock()
+    instance.arun = AsyncMock(return_value=mock_result)
 
+    @asynccontextmanager
+    async def _shared():
+        yield instance
+
+    with patch("app.tools.triage.shared_crawler", _shared):
         result = await client.call_tool(
             "score_and_triage_urls",
             {"urls": ["https://example.com"], "query": "test research"},

@@ -32,7 +32,7 @@ from google.adk.agents import LlmAgent
 
 from ..config import config
 from ..jsonio import invoke_json_with_retry
-from ..llm import build_agent
+from ..llm import DETERMINISTIC_CONFIG, build_agent
 from ..schemas import Depth, ResearchPlan
 
 # A runner takes the normalized query and returns the model's structured output,
@@ -106,6 +106,7 @@ def build_planner(*, model: Optional[object] = None) -> LlmAgent:
         output_schema=ResearchPlan,
         output_key=OUTPUT_KEY,
         model=model,
+        generate_content_config=DETERMINISTIC_CONFIG,
     )
 
 

@@ -1,0 +1,11 @@
+{
+  "description": "AC4 — contradictory sources produce a FLAGGED claim and Factual Contradictions section",
+  "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+  "seeded_corpus": "ac4_contradictory",
+  "assertions": {
+    "ledger_has_flagged_claim": true,
+    "draft_contains_section": "### Factual & Methodological Contradictions",
+    "draft_must_not_contain": "### Temporal Drift\n_No temporal drift detected._"
+  },
+  "note": "Two sources from different eTLD+1 domains assert contradictory facts about Tokio vs async-std performance. Verifier stub returns a FLAGGED claim with FACTUAL conflict_type."
+}

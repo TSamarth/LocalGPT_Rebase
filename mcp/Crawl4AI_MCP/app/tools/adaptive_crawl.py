@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from crawl4ai import AdaptiveCrawler, AsyncWebCrawler, BrowserConfig
+from crawl4ai import AdaptiveCrawler
 from fastmcp import Context
 
 from app.config import config
+from app.crawler import shared_crawler
 from app.domain import registrable_domain
 from app.storage.chroma_store import get_chroma
 from app.storage.chunker import chunk_text
@@ -59,14 +60,12 @@ async def adaptive_crawl(
             f"(target confidence={target_confidence})"
         )
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True,verbose=False)
-
     crawled_urls: List[str] = []
     aggregated_fit_markdown: List[str] = []
     pages_with_content = 0
 
     try:
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
+        async with shared_crawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, max_pages=max_pages)
 
             digest_result = await adaptive.digest(

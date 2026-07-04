@@ -29,14 +29,12 @@ its ``StdioConnectionParams``/``StdioServerParameters`` are imported *inside*
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 from google.adk.agents import LlmAgent
 from google.adk.tools.base_toolset import BaseToolset
 
-from ..config import config
-from ..llm import build_agent
+from ..llm import DETERMINISTIC_CONFIG, build_agent
 from ..schemas import CrawlStrategy, ScoredURL
 
 # MCP crawl tools the Extractor is allowed to call, keyed by the strategy the
@@ -73,6 +71,9 @@ Rules:
 - Do not summarise or rewrite page content yourself — the MCP tools do the
   content filtering. Hand downstream the returned page/chunk IDs, not raw text.
 - When every non-skipped URL has been crawled, report the page IDs you created.
+- Your final response MUST be ONLY a JSON array of the created page-id strings —
+  e.g. ["page-1", "page-2"] — or [] if nothing was crawled. Never answer the
+  research question, summarise findings, or emit any prose before or after it.
 """
 
 
@@ -98,32 +99,14 @@ def chunk_metadata_for(scored: ScoredURL) -> dict:
 def _build_default_toolset() -> BaseToolset:
     """Construct the real crawl4ai ``MCPToolset`` (stdio subprocess).
 
-    Imported lazily because ``mcp`` is an optional ADK extra: keeping the import
-    out of module scope lets the orchestrator (and the offline unit tests) load
-    this module — and inject a fake toolset — without ``mcp`` installed.
-
-    The server is launched exactly as its own package documents (``uv run python
-    main.py`` over stdio) from ``config.MCP_SERVER_CWD``. ``tool_filter`` restricts
-    the agent to the crawl tools it is permitted to write with; the read/triage
-    tools belong to the Acquirer.
+    ``tool_filter`` restricts the agent to the crawl tools it is permitted to
+    write with; the read/triage tools belong to the Acquirer (least-privilege,
+    §1). The shared construction body (and its lazy ``mcp`` import) lives in
+    ``crawl4ai_toolset.build_crawl4ai_toolset``.
     """
-    from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
-    from mcp import StdioServerParameters
+    from .crawl4ai_toolset import build_crawl4ai_toolset
 
-    server_cwd_path = Path(config.MCP_SERVER_CWD).resolve()
-    server_cwd = str(server_cwd_path)
-    venv_python = str(server_cwd_path / ".venv" / "Scripts" / "python.exe")
-    return MCPToolset(
-        connection_params=StdioConnectionParams(
-            server_params=StdioServerParameters(
-                command=venv_python,
-                args=["main.py"],
-                cwd=server_cwd,
-            ),
-            timeout=500.0,
-        ),
-        tool_filter=list(STRATEGY_TOOL_NAMES.values()),
-    )
+    return build_crawl4ai_toolset(list(STRATEGY_TOOL_NAMES.values()))
 
 
 def build_extractor(toolset: Optional[BaseToolset] = None) -> LlmAgent:
@@ -144,4 +127,5 @@ def build_extractor(toolset: Optional[BaseToolset] = None) -> LlmAgent:
         role_prompt=_EXTRACTOR_ROLE_PROMPT,
         tools=[active_toolset],
         output_key="extracted_page_ids",
+        generate_content_config=DETERMINISTIC_CONFIG,
     )

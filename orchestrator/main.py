@@ -15,6 +15,7 @@ draft to ``data/sessions/{session_id}/`` — that path is printed too.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ async def _drive(runner, app_name: str, query: str) -> tuple[Any, str]:
 
 
 def main(argv: list[str]) -> int:
+    logging.basicConfig(level=config.LOG_LEVEL)
     config.ensure_data_dirs()
     query = " ".join(argv).strip()
     if not query:

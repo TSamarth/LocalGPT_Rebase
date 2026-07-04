@@ -33,7 +33,6 @@ The optional toolset is injectable and lazily imported, exactly like the Extract
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple, Union
 
 from google.adk.agents import LlmAgent
@@ -41,7 +40,7 @@ from google.adk.tools.base_toolset import BaseToolset
 
 from ..config import config
 from ..jsonio import invoke_json_with_retry, loads_first_json
-from ..llm import build_agent
+from ..llm import DETERMINISTIC_CONFIG, build_agent
 from ..schemas import (
     ClaimLedger,
     ClaimStatus,
@@ -444,23 +443,9 @@ def _build_default_toolset() -> BaseToolset:
     can retrieve crawled chunks itself, per subtopic, without holding any write
     tool (least-privilege, architecture.md §1/§2).
     """
-    from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
-    from mcp import StdioServerParameters
+    from .crawl4ai_toolset import build_crawl4ai_toolset
 
-    server_cwd_path = Path(config.MCP_SERVER_CWD).resolve()
-    server_cwd = str(server_cwd_path)
-    venv_python = str(server_cwd_path / ".venv" / "Scripts" / "python.exe")
-    return MCPToolset(
-        connection_params=StdioConnectionParams(
-            server_params=StdioServerParameters(
-                command=venv_python,
-                args=["main.py"],
-                cwd=server_cwd,
-            ),
-            timeout=500.0,
-        ),
-        tool_filter=[SEARCH_TOOL_NAME],
-    )
+    return build_crawl4ai_toolset([SEARCH_TOOL_NAME])
 
 
 def build_verifier(
@@ -490,6 +475,7 @@ def build_verifier(
             tools=[toolset],
             output_key=output_key,
             model=model,
+            generate_content_config=DETERMINISTIC_CONFIG,
         )
     return build_agent(
         name=AGENT_NAME,
@@ -497,6 +483,7 @@ def build_verifier(
         output_schema=ClaimLedger,
         output_key=output_key,
         model=model,
+        generate_content_config=DETERMINISTIC_CONFIG,
     )
 
 

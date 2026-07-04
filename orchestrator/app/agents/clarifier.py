@@ -30,7 +30,7 @@ from typing import Awaitable, Callable, Optional
 from google.adk.agents import LlmAgent
 
 from ..jsonio import invoke_json_with_retry
-from ..llm import build_agent
+from ..llm import DETERMINISTIC_CONFIG, build_agent
 from ..schemas import ClarifyResult
 
 # Stable identifiers so the orchestrator and session state agree on names.
@@ -110,6 +110,7 @@ def build_clarifier(*, model: Optional[object] = None) -> LlmAgent:
         output_schema=ClarifyResult,
         output_key=OUTPUT_KEY,
         model=model,  # type: ignore[arg-type]  # LiteLlm | None; only set by tests
+        generate_content_config=DETERMINISTIC_CONFIG,
     )
 
 

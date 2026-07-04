@@ -28,12 +28,18 @@ runner so the REST and A2A surfaces share the same session DB.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
 from google.adk.cli.fast_api import get_fast_api_app
 
 from app.config import config
+
+# Single logging config for the server entrypoint, driven by LOG_LEVEL. The
+# server has no explicit main() (it is imported by uvicorn/adk), so configure at
+# module import — the ``orchestrator.*`` module loggers inherit this level.
+logging.basicConfig(level=config.LOG_LEVEL)
 
 APP_NAME = "localgpt_research"
 HOST = "localhost"

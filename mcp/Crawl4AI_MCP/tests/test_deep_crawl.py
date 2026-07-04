@@ -1,6 +1,7 @@
 """Tests for deep_crawl tool."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -54,14 +55,15 @@ async def test_deep_crawl_max_pages_respected(client):
             return seed_page
         return sub_page
 
-    with patch("app.tools.deep_crawl.AsyncWebCrawler") as MockCrawler, \
-         patch("app.tools.deep_crawl._persist_result", return_value="pid"):
-        instance = AsyncMock()
-        instance.arun = mock_arun
-        instance.__aenter__ = AsyncMock(return_value=instance)
-        instance.__aexit__ = AsyncMock(return_value=None)
-        MockCrawler.return_value = instance
+    instance = AsyncMock()
+    instance.arun = mock_arun
 
+    @asynccontextmanager
+    async def _shared():
+        yield instance
+
+    with patch("app.tools.deep_crawl.shared_crawler", _shared), \
+         patch("app.tools.deep_crawl._persist_result", return_value="pid"):
         result = await client.call_tool(
             "deep_crawl",
             {"seed_url": seed, "max_pages": 3, "max_depth": 1},

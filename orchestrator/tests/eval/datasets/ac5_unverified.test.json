@@ -1,0 +1,9 @@
+{
+  "description": "AC5 — single-source claim is marked UNCORROBORATED",
+  "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+  "seeded_corpus": "ac5_single_source",
+  "assertions": {
+    "ledger_has_uncorroborated_claim": true
+  },
+  "note": "Only one ScoredURL from a single eTLD+1 domain. Verifier stub returns a claim with UNCORROBORATED status (one source cannot corroborate)."
+}

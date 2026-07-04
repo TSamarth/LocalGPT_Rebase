@@ -8,10 +8,11 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, LinkPreviewConfig
+from crawl4ai import CrawlerRunConfig, LinkPreviewConfig
 from fastmcp import Context
 
 from app.config import config
+from app.crawler import shared_crawler
 from app.utils import get_cache_mode
 
 
@@ -73,8 +74,6 @@ async def score_and_triage_urls(
     if ctx:
         await ctx.info(f"Triaging {len(urls)} URLs for query: '{query}'")
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True, verbose=False)
-
     link_preview_cfg = LinkPreviewConfig(
         verbose=False,
         include_internal=True,
@@ -101,7 +100,7 @@ async def score_and_triage_urls(
     url_set = set(urls)
     scored_map: Dict[str, Dict] = {}
 
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+    async with shared_crawler() as crawler:
         for i, url in enumerate(urls):
             if ctx:
                 await ctx.info(f"  Scoring {i+1}/{len(urls)}: {url}")

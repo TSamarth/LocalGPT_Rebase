@@ -1,0 +1,17 @@
+{
+  "description": "AC1 — clarifier behaviour on ambiguous vs clear queries",
+  "cases": [
+    {
+      "id": "ac1_ambiguous",
+      "query": "tell me about it",
+      "expect_clarifier_pause": true,
+      "note": "Single-word pronoun query; a well-prompted clarifier should ask for disambiguation"
+    },
+    {
+      "id": "ac1_clear",
+      "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+      "expect_clarifier_pause": false,
+      "note": "Specific, well-formed query; clarifier should pass through without pausing"
+    }
+  ]
+}

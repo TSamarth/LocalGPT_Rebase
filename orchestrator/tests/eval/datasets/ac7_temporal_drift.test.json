@@ -1,0 +1,14 @@
+{
+  "description": "AC7 — sources with publication_date delta >=18 months produce temporal_drift conflict and Temporal Drift section",
+  "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+  "seeded_corpus": "ac7_temporal_drift",
+  "temporal_drift_threshold_months": 18,
+  "date_delta_months": 24,
+  "assertions": {
+    "ledger_has_temporal_drift_conflict": true,
+    "conflict_type": "temporal_drift",
+    "draft_temporal_drift_section_non_empty": true,
+    "flagged_claim_not_in_factual_section": true
+  },
+  "note": "Old source (2021-01-01) and new source (2023-01-01) — 24 month gap exceeds the 18-month TEMPORAL_DRIFT_THRESHOLD_MONTHS. Verifier stub returns a FLAGGED claim with TEMPORAL_DRIFT conflict_type."
+}

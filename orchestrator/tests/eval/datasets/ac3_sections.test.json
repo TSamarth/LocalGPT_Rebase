@@ -1,0 +1,12 @@
+{
+  "description": "AC3 — rendered markdown has all required structural sections",
+  "query": "What are the main differences between Rust async runtimes Tokio and async-std?",
+  "required_sections": [
+    "## Coverage",
+    "## Contradictions",
+    "### Factual & Methodological Contradictions",
+    "### Temporal Drift",
+    "## Sources"
+  ],
+  "note": "render_report always produces these sections deterministically. Uses seeded corpus + stub writer."
+}

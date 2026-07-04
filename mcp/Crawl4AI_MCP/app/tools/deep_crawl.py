@@ -12,12 +12,13 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+from crawl4ai import CrawlerRunConfig
 from crawl4ai.content_filter_strategy import BM25ContentFilter, PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from fastmcp import Context
 
 from app.config import config
+from app.crawler import shared_crawler
 from app.tools.crawl import _build_llm_extraction_strategy, _format_result, _persist_result
 from app.utils import get_cache_mode
 
@@ -111,8 +112,6 @@ async def deep_crawl(
         extraction_strategy=extraction_strategy,
     )
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True,verbose=False)
-
     # BFS state
     queue: deque = deque([(seed_url, 0)])
     visited: set = set()
@@ -121,7 +120,7 @@ async def deep_crawl(
     fail_count = 0
     deepest_depth = 0
 
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+    async with shared_crawler() as crawler:
         while queue and len(results_out) < max_pages:
             url, depth = queue.popleft()
 

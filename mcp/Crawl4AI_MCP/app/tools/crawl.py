@@ -31,6 +31,7 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from fastmcp import Context
 
 from app.config import config
+from app.crawler import shared_crawler
 from app.domain import registrable_domain
 from app.ratelimit import crawl_with_retry, get_rate_limiter
 from app.storage.chroma_store import get_chroma
@@ -418,7 +419,6 @@ async def crawl_url(
         # PDF/arXiv: route through the PDF processor for faithful text extraction.
         result = await crawl_with_retry(lambda: _crawl_pdf(url), ctx=ctx)
     else:
-        browser_cfg = BrowserConfig(headless=True, text_mode=not take_screenshot, light_mode=True, verbose=False)
         run_cfg = _build_run_config(
             query=query,
             css_selector=css_selector,
@@ -430,9 +430,18 @@ async def crawl_url(
             use_llm_extraction=llm_extract,
         )
 
-        async def _do() -> Any:
-            async with AsyncWebCrawler(config=browser_cfg) as crawler:
-                return await crawler.arun(url, config=run_cfg)
+        if take_screenshot:
+            # Screenshots need images loaded (text_mode disabled), so the shared
+            # text-mode browser won't do — use a dedicated short-lived crawler.
+            browser_cfg = BrowserConfig(headless=True, text_mode=False, light_mode=True, verbose=False)
+
+            async def _do() -> Any:
+                async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                    return await crawler.arun(url, config=run_cfg)
+        else:
+            async def _do() -> Any:
+                async with shared_crawler() as crawler:
+                    return await crawler.arun(url, config=run_cfg)
 
         result = await crawl_with_retry(_do, ctx=ctx)
 
@@ -486,7 +495,6 @@ async def crawl_many(
 
     effective_concurrent = min(max_concurrent, config.MAX_CONCURRENT_CRAWLS)
 
-    browser_cfg = BrowserConfig(headless=True, text_mode=True, light_mode=True, verbose=False)
     run_cfg = _build_run_config(query=query, cache_mode_str=cache_mode, use_llm_extraction=llm_extract)
 
     dispatcher = MemoryAdaptiveDispatcher(
@@ -498,7 +506,7 @@ async def crawl_many(
     success_count = 0
     fail_count = 0
 
-    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+    async with shared_crawler() as crawler:
         async for result in await crawler.arun_many(
             urls=urls,
             config=run_cfg.clone(stream=True),

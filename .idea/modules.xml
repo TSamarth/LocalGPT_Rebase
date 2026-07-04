@@ -3,6 +3,8 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/LocalGPT_Rebase.iml" filepath="$PROJECT_DIR$/.idea/LocalGPT_Rebase.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/a2a-deep-research.iml" filepath="$PROJECT_DIR$/.idea/a2a-deep-research.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/crawl4ai-mcp.iml" filepath="$PROJECT_DIR$/.idea/crawl4ai-mcp.iml" />
     </modules>
   </component>
 </project>

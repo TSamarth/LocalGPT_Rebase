@@ -1169,3 +1169,128 @@ async def test_cp1_reject_does_not_rerun_clarify_or_plan():
     # ...yet clarify/plan ran exactly once across every reject re-pause.
     assert clarifier_calls == [1], f"clarifier re-ran on CP1 reject: {clarifier_calls}"
     assert planner_calls == [1], f"planner re-ran on CP1 reject: {planner_calls}"
+
+
+# ── E6 P1: acquirer JSON re-ask at the node seam ──────────────────────────────
+def _prose_then_json_acquirer_stub(calls: list[str]) -> object:
+    """Acquirer that answers in PROSE on the first call (the live failure mode)
+    and returns a valid ScoredURL JSON string on the re-ask."""
+
+    @node
+    async def _stub(node_input: str) -> str:
+        calls.append(node_input)
+        if len(calls) == 1:
+            return "Vector databases trade recall for latency; in summary..."
+        return (
+            '[{"url": "https://a.example/doc", "score": 0.9,'
+            ' "strategy": "crawl_url", "etld1": "a.example"}]'
+        )
+
+    return _stub
+
+
+def _always_prose_acquirer_stub(calls: list[str]) -> object:
+    """Acquirer that never returns JSON — both the first call and the re-ask fail."""
+
+    @node
+    async def _stub(node_input: str) -> str:
+        calls.append(node_input)
+        return "I believe the answer to your question is as follows..."
+
+    return _stub
+
+
+async def test_acquirer_prose_triggers_json_reask():
+    """Prose first answer → workflow re-asks ONCE with the JSON-only suffix and
+    the run proceeds on the re-ask's URLs (no silent empty-degrade)."""
+    from app.jsonio import JSON_ONLY_REASK
+
+    calls: list[str] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_prose_then_json_acquirer_stub(calls),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve, cp3_reply="d"
+    )
+    assert len(calls) == 2, f"expected one re-ask, saw {len(calls)} acquirer calls"
+    assert calls[1].endswith(JSON_ONLY_REASK)
+    assert calls[1].startswith(calls[0])
+    assert result.kept_count("s1") == 1
+    assert "v2_acquire_failure" not in _drive_through_checkpoints.last_session_state
+
+
+async def test_acquirer_double_failure_emits_state_event_and_continues():
+    """Prose on BOTH attempts → run degrades to zero URLs but the failure is
+    surfaced as a ``v2_acquire_failure`` state event, not silently swallowed."""
+    calls: list[str] = []
+    verifier = _verifier_stub_from_passes(
+        [ClaimLedger(claims=[_kept_claim("c1", "s1")])]
+    )
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_always_prose_acquirer_stub(calls),
+        extractor_node=_extractor_stub(),
+        verifier_node=verifier,
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve, cp3_reply="d"
+    )
+    assert len(calls) == 2  # first call + one bounded re-ask, no infinite loop
+    failure = _drive_through_checkpoints.last_session_state.get("v2_acquire_failure")
+    assert failure is not None, "acquire failure was silently swallowed"
+    assert failure["subtopic_id"] == "s1"
+    assert result.kept_count("s1") == 1  # run still completed
+
+
+# ── E6 P3: verifier handoff seam fails loudly ─────────────────────────────────
+def _garbage_verifier_stub() -> object:
+    """Verifier that answers in prose → parse_ledger raises ValueError (the live
+    failure mode the loud seam must surface)."""
+
+    @node
+    async def _stub(node_input: str) -> str:
+        return "Based on the sources, the claim appears well supported overall."
+
+    return _stub
+
+
+async def test_verifier_garbage_emits_failure_state_and_degrades():
+    """Unparseable verifier output → empty ledger (as before) BUT a
+    ``v2_verify_failure`` state event is emitted instead of a silent swallow."""
+    workflow = build_research_workflow(
+        clarifier_node=_clarifier_stub(),
+        planner_node=_single_subtopic_planner_stub(1, Depth.NORMAL),
+        acquirer_node=_acquirer_stub(),
+        extractor_node=_extractor_stub(),
+        verifier_node=_garbage_verifier_stub(),
+        writer_node=_writer_stub(),
+    )
+    approve = ResearchPlan(
+        subtopics=[Subtopic(id="s1", question="only angle", target_evidence=1)],
+        depth=Depth.NORMAL,
+    )
+    result = await _drive_through_checkpoints(
+        workflow, approved_plan=approve, cp3_reply="d"
+    )
+    failure = _drive_through_checkpoints.last_session_state.get("v2_verify_failure")
+    assert failure is not None, "verify failure was silently swallowed"
+    assert failure["subtopic_id"] == "s1"
+    assert result.kept_count("s1") == 0  # degraded to empty ledger, run still completed

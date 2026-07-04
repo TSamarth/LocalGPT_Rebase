@@ -36,13 +36,16 @@ E3.S2 — see the note on the ``store`` seam below).
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from typing import Optional
 
 from google.adk import Context, Workflow
 from google.adk.events import Event, RequestInput
 from google.adk.workflow import START, node
 from google.adk.workflow._base_node import BaseNode
+from google.adk.workflow._errors import NodeInterruptedError
 
 # Imported as MODULES (not symbols) so their ``_build_default_toolset`` /
 # ``build_<x>`` attributes stay monkeypatchable in the node-path lifecycle tests
@@ -53,10 +56,118 @@ from .agents import verifier as verifier_mod
 from .agents.clarifier import build_clarifier, parse_clarify_result
 from .agents.planner import build_planner, parse_plan
 from .agents.writer import build_writer, render_report
+from .citation import CitationClient
 from .cp3_adapter import apply_cp3_verbs
+from .jsonio import JSON_ONLY_REASK
 from .llm import build_model
 from .research_policy import depth_budget, merge_ledger, stop_rule
 from .schemas import ClaimLedger, Depth, ResearchPlan, ScoredURL
+
+logger = logging.getLogger("orchestrator.workflow")
+
+
+# ── H1: invocation-scoped run-resource cache ───────────────────────────────────
+# The ``research`` node is ``rerun_on_resume=True``: ADK replays it top-to-bottom
+# on every HITL resume hop. Its OWNED crawl4ai toolsets/agents + citation client
+# are plain node-body code (not checkpoint-skippable children), so a naive build
+# re-runs every hop; and because ``ctx.run_node`` raises ``NodeInterruptedError``
+# (a BaseException, agents/context.py:523) up through the loop's cleanup, a paused
+# hop CLOSED them — forcing a full rebuild + crawl4ai subprocess re-spawn on
+# resume. We cache them per ``invocation_id`` and REUSE across pause/resume,
+# releasing (closing) them only on the run's normal completion or a real error —
+# never on a HITL pause. Also keyed on the building event loop so a resume on a
+# different loop rebuilds safely rather than reusing a loop-bound session.
+class _RunResources:
+    """Per-invocation owned resources for the ``research`` node (H1)."""
+
+    __slots__ = (
+        "acquirer",
+        "extractor",
+        "verifier",
+        "owned_toolsets",
+        "citation_client",
+        "loop",
+    )
+
+    def __init__(
+        self, *, acquirer, extractor, verifier, owned_toolsets, citation_client, loop
+    ) -> None:
+        self.acquirer = acquirer
+        self.extractor = extractor
+        self.verifier = verifier
+        self.owned_toolsets = owned_toolsets
+        self.citation_client = citation_client
+        self.loop = loop
+
+    async def aclose(self) -> None:
+        # Close each OWNED toolset once (idempotent in ADK; injected nodes have
+        # none). The shared stdio session manager (H2) is closed by whichever
+        # owned toolset holds it; subsequent closes are no-ops.
+        for ts in self.owned_toolsets:
+            await ts.close()
+        await self.citation_client.aclose()
+
+
+_RUN_RESOURCES: dict[str, _RunResources] = {}
+
+
+async def _release_run_resources(cache_key: str) -> None:
+    """Pop and close the cached resources for ``cache_key`` (safe if absent)."""
+    res = _RUN_RESOURCES.pop(cache_key, None)
+    if res is not None:
+        await res.aclose()
+
+# CP3 verb grammar first-tokens (see cp3_adapter.apply_cp3_verbs). Used only to
+# flag reply lines that match no verb — apply_cp3_verbs stays the single source
+# of truth for actually applying them.
+_CP3_VERBS = frozenset({"+", "-", "r", "redirect", "d", "done"})
+
+
+def _unrecognized_cp3_lines(reply: str) -> list[str]:
+    """Non-empty lines in a CP3 reply whose first token is not a known verb."""
+    unrecognized: list[str] = []
+    for line in reply.splitlines():
+        action = line.strip()
+        if not action:
+            continue
+        verb = action.partition(" ")[0].lower()
+        if verb not in _CP3_VERBS:
+            unrecognized.append(action)
+    return unrecognized
+
+
+async def _acquire_urls(
+    ctx: Context, acquirer: object, payload: str
+) -> tuple[list[ScoredURL], Optional[str]]:
+    """Run the Acquirer node and coerce its output, with ONE bounded JSON re-ask.
+
+    The v1 live path routed the Acquirer through ``jsonio.invoke_json_with_retry``
+    (E0.S2) but the node path bypassed it — so in production a prose answer (the
+    model "answering the question" instead of tool-calling) silently degraded to
+    ``urls=[]``. This restores the corrective re-ask at the node seam: if the
+    first output carries no parseable ScoredURL JSON, re-run the node once with
+    the :data:`JSON_ONLY_REASK` suffix. Resume-deterministic: the retry decision
+    derives from the first node's PERSISTED output, so a replay takes the same
+    branch and the schedule stays aligned.
+
+    Returns ``(urls, None)`` on success or ``([], error_message)`` after the
+    re-ask also fails — the caller emits the failure into session state instead
+    of masking it.
+    """
+    try:
+        return acquirer_mod.parse_scored_urls(await ctx.run_node(acquirer, payload)), None
+    except ValueError as first_err:
+        logger.warning("acquirer output not parseable, issuing JSON-only re-ask: %s", first_err)
+        try:
+            return (
+                acquirer_mod.parse_scored_urls(
+                    await ctx.run_node(acquirer, payload + JSON_ONLY_REASK)
+                ),
+                None,
+            )
+        except ValueError as retry_err:
+            logger.error("acquirer re-ask still not parseable: %s", retry_err)
+            return [], f"first: {first_err}; reask: {retry_err}"
 
 # ── Reject signal (E3.S1 T3) ─────────────────────────────────────────────────
 # The v1 console gates raised ``CheckpointRejected`` on a reject; ``run_pipeline``
@@ -378,33 +489,77 @@ def build_research_workflow(
         # ── E3.S2 T1: emit approved plan into ADK session state ──────────────
         yield Event(state={"v2_plan": approved.model_dump(mode="json")})
 
-        # ── Toolset-once / close() lifecycle (E2.S2 T4) ──────────────────────
-        # Build each OWNED crawl4ai MCPToolset exactly ONCE per run here at loop
-        # entry, share it across every acquire/extract/verify pass, and close it
-        # in the ``finally`` below. This delivers the once-per-run lifecycle that
-        # v1 could not (each v1 ``_drive`` ran under its own ``asyncio.run``, so a
-        # stdio toolset was bound to a single drive call). Ownership rule mirrors
-        # ``pipeline._drive_extractor``: an INJECTED node is caller-owned, so we
-        # build/close NO toolset for it; only a defaulted agent owns its toolset.
-        owned_toolsets = []
-        if acquirer_node is not None:
-            acquirer = acquirer_node
+        # ── Toolset-once + resume-idempotent lifecycle (E2.S2 T4 · H1 · H2) ───
+        # Build the OWNED crawl4ai toolsets/agents + citation client ONCE per run
+        # and cache them by ``invocation_id`` (see ``_RUN_RESOURCES``) so a HITL
+        # resume hop REUSES them instead of rebuilding + re-spawning the crawl4ai
+        # subprocess (H1). Released only on normal completion / real error, never
+        # on a pause. Ownership rule unchanged: an INJECTED node is caller-owned,
+        # so we build/close NO toolset for it; only a defaulted agent owns its
+        # toolset. H2: the defaulted toolsets ADOPT one shared stdio session
+        # manager (the first real toolset's), collapsing 3 subprocesses to 1 while
+        # each keeps its own ``tool_filter`` (per-agent least-privilege preserved).
+        cache_key = ctx.invocation_id
+        running_loop = asyncio.get_running_loop()
+        _res = _RUN_RESOURCES.get(cache_key)
+        if _res is not None and _res.loop is running_loop:
+            acquirer = _res.acquirer
+            extractor = _res.extractor
+            verifier = _res.verifier
+            owned_toolsets = _res.owned_toolsets
+            citation_client = _res.citation_client
         else:
-            acquirer_ts = acquirer_mod._build_default_toolset()
-            acquirer = acquirer_mod.build_acquirer(acquirer_ts)
-            owned_toolsets.append(acquirer_ts)
-        if extractor_node is not None:
-            extractor = extractor_node
-        else:
-            extractor_ts = extractor_mod._build_default_toolset()
-            extractor = extractor_mod.build_extractor(extractor_ts)
-            owned_toolsets.append(extractor_ts)
-        if verifier_node is not None:
-            verifier = verifier_node
-        else:
-            verifier_ts = verifier_mod._build_default_toolset()
-            verifier = verifier_mod.build_verifier(toolset=verifier_ts)
-            owned_toolsets.append(verifier_ts)
+            if _res is not None:
+                # Stale entry from a different event loop — release then rebuild.
+                await _release_run_resources(cache_key)
+            owned_toolsets = []
+            _shared_mgr: list = []  # 0-or-1 element: the shared stdio session mgr
+
+            def _adopt(ts):
+                """Give a real ``McpToolset`` the shared stdio session manager (H2).
+
+                Fake/injected toolsets (offline lifecycle tests) lack
+                ``_mcp_session_manager`` and are left untouched, so those tests
+                still observe their own per-build fakes closed exactly once.
+                """
+                if hasattr(ts, "_mcp_session_manager"):
+                    if _shared_mgr:
+                        ts._mcp_session_manager = _shared_mgr[0]
+                    else:
+                        _shared_mgr.append(ts._mcp_session_manager)
+                return ts
+
+            if acquirer_node is not None:
+                acquirer = acquirer_node
+            else:
+                acquirer_ts = _adopt(acquirer_mod._build_default_toolset())
+                acquirer = acquirer_mod.build_acquirer(acquirer_ts)
+                owned_toolsets.append(acquirer_ts)
+            if extractor_node is not None:
+                extractor = extractor_node
+            else:
+                extractor_ts = _adopt(extractor_mod._build_default_toolset())
+                extractor = extractor_mod.build_extractor(extractor_ts)
+                owned_toolsets.append(extractor_ts)
+            if verifier_node is not None:
+                verifier = verifier_node
+            else:
+                verifier_ts = _adopt(verifier_mod._build_default_toolset())
+                verifier = verifier_mod.build_verifier(toolset=verifier_ts)
+                owned_toolsets.append(verifier_ts)
+
+            # Citation-BFS enrichment (architecture.md §11): one client for the
+            # whole run, cached/closed alongside the toolsets. ``enrich_with_
+            # citations`` no-ops unless ``should_run_citation_bfs`` passes.
+            citation_client = CitationClient()
+            _RUN_RESOURCES[cache_key] = _RunResources(
+                acquirer=acquirer,
+                extractor=extractor,
+                verifier=verifier,
+                owned_toolsets=owned_toolsets,
+                citation_client=citation_client,
+                loop=running_loop,
+            )
 
         # ── Research loop (E2.S2 T2+T3): port of v1 ``_run_research`` ─────────
         # ONE store-backed accumulator across ALL subtopics; subtopics run
@@ -434,18 +589,29 @@ def build_research_workflow(
                     )
                     before = len(ledger.claims)
 
-                    acquire_payload = json.dumps(
-                        {
-                            "subtopic": subtopic.model_dump(mode="json"),
-                            "depth": approved.depth.value,
-                        }
+                    acquire_payload = acquirer_mod.build_acquirer_prompt(
+                        subtopic.question,
+                        depth=approved.depth,
+                        source_classes=subtopic.source_classes,
                     )
-                    try:
-                        urls = acquirer_mod.parse_scored_urls(
-                            await ctx.run_node(acquirer, acquire_payload)
+                    urls, acquire_error = await _acquire_urls(ctx, acquirer, acquire_payload)
+                    if acquire_error is not None:
+                        yield Event(
+                            state={
+                                "v2_acquire_failure": {
+                                    "subtopic_id": subtopic.id,
+                                    "iteration": iteration,
+                                    "error": acquire_error,
+                                }
+                            }
                         )
-                    except ValueError:
-                        urls = []
+                    urls = await acquirer_mod.enrich_with_citations(
+                        urls,
+                        subtopic_question=subtopic.question,
+                        depth=approved.depth,
+                        source_classes=subtopic.source_classes,
+                        client=citation_client,
+                    )
 
                     # ── CP3 (E3.S1 T2): real deep-only RequestInput checkpoint ─
                     # The seam between acquire and extract. Gated on
@@ -477,6 +643,17 @@ def build_research_workflow(
                             if not _is_str_reject(reply):
                                 break
                             cp3_attempt += 1
+                        # apply_cp3_verbs silently ignores lines that match no verb;
+                        # log them here so an unexpected reply shape is visible rather
+                        # than degrading invisibly to a no-op.
+                        unrecognized = _unrecognized_cp3_lines(reply)
+                        if unrecognized:
+                            logger.warning(
+                                "CP3 reply for subtopic %s (iter %s) had unrecognized lines: %r",
+                                subtopic.id,
+                                iteration,
+                                unrecognized,
+                            )
                         urls, needs_supplemental = apply_cp3_verbs(urls, reply)
 
                         # ── Supplemental re-entry (v2 analog of v1 appending
@@ -488,12 +665,27 @@ def build_research_workflow(
                         # only when supplemental) so ADK execution-IDs stay aligned
                         # on resume; the merged list is what feeds extract.
                         if needs_supplemental:
-                            try:
-                                supplemental = acquirer_mod.parse_scored_urls(
-                                    await ctx.run_node(acquirer, acquire_payload)
+                            supplemental, supp_error = await _acquire_urls(
+                                ctx, acquirer, acquire_payload
+                            )
+                            if supp_error is not None:
+                                yield Event(
+                                    state={
+                                        "v2_acquire_failure": {
+                                            "subtopic_id": subtopic.id,
+                                            "iteration": iteration,
+                                            "supplemental": True,
+                                            "error": supp_error,
+                                        }
+                                    }
                                 )
-                            except ValueError:
-                                supplemental = []
+                            supplemental = await acquirer_mod.enrich_with_citations(
+                                supplemental,
+                                subtopic_question=subtopic.question,
+                                depth=approved.depth,
+                                source_classes=subtopic.source_classes,
+                                client=citation_client,
+                            )
                             urls = urls + supplemental
 
                     # Extract crawls into ChromaDB; page-ids are discarded (as v1).
@@ -514,20 +706,53 @@ def build_research_workflow(
                                 await ctx.run_node(verifier, subtopic.question)
                             )
                         )
-                    except ValueError:
+                    except ValueError as verify_err:
+                        # Degrade to an empty ledger (as before) but surface the
+                        # failure loudly instead of swallowing it — a verifier that
+                        # answers in prose / times out must be visible in the trace.
+                        logger.error(
+                            "verifier output not parseable for subtopic %s (iter %s): %s",
+                            subtopic.id,
+                            iteration,
+                            verify_err,
+                        )
+                        yield Event(
+                            state={
+                                "v2_verify_failure": {
+                                    "subtopic_id": subtopic.id,
+                                    "iteration": iteration,
+                                    "error": str(verify_err),
+                                }
+                            }
+                        )
                         new = ClaimLedger(claims=[])
                     ledger = merge_ledger(ledger, new)
-                    # ── E3.S2 T1: emit accumulated ledger into ADK session state
-                    yield Event(state={"v2_ledger": ledger.model_dump(mode="json")})
 
                     after = len(ledger.claims)
                     new_claims = after - before
                     iteration += 1
-        finally:
-            # Close each OWNED toolset once (idempotent in ADK; injected nodes
-            # left open — caller owns their lifecycle). Runs even if the loop raised.
-            for ts in owned_toolsets:
-                await ts.close()
+                # ── E3.S2 T1 / M3: emit accumulated ledger into ADK session
+                # state ONCE per subtopic (milestone), not every inner-loop
+                # iteration — avoids O(n²) re-serialization and one DB event +
+                # ``claim_ledger.json`` rewrite per pass. The final subtopic's
+                # emission doubles as the run-end flush.
+                yield Event(state={"v2_ledger": ledger.model_dump(mode="json")})
+        except NodeInterruptedError:
+            # HITL pause (e.g. a CP3 ``RequestInput`` inside the loop): KEEP the
+            # cached resources — and the shared crawl4ai subprocess — alive so the
+            # resume hop reuses them instead of rebuilding/re-spawning (H1). ADK
+            # raises this BaseException from ``ctx.run_node`` on pause; re-raise so
+            # the run suspends normally.
+            raise
+        except BaseException:
+            # Real error (or cancellation): release the OWNED resources (idempotent
+            # in ADK; injected nodes left open — caller owns their lifecycle), then
+            # propagate.
+            await _release_run_resources(cache_key)
+            raise
+        else:
+            # Loop finished for this hop: release the OWNED resources.
+            await _release_run_resources(cache_key)
 
         # ── T0: run the Writer + render the markdown draft ───────────────────
         # The Writer is reasoning-only (no toolset, no output_schema). Feed it the

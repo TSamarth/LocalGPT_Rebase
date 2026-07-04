@@ -35,3 +35,6 @@ htmlcov/
 
 #Temp Docs
 claudedocs/
+
+# tokensave MCP local cache/DB
+.tokensave/

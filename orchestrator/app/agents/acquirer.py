@@ -32,7 +32,7 @@ extra). Unit tests inject a fake ``BaseToolset`` and never touch that import.
 from __future__ import annotations
 
 import json
-from pathlib import Path
+import logging
 from typing import Awaitable, Callable, Optional, Union
 
 from google.adk.agents import LlmAgent
@@ -41,8 +41,10 @@ from google.adk.tools.base_toolset import BaseToolset
 from ..citation import CitationClient, RelevanceScorer, extract_paper_id
 from ..config import config
 from ..jsonio import invoke_json_with_retry, loads_first_json
-from ..llm import build_agent
+from ..llm import DETERMINISTIC_CONFIG, build_agent
 from ..schemas import CrawlStrategy, Depth, ResearchPlan, ScoredURL, SourceClass, Subtopic
+
+logger = logging.getLogger("orchestrator.agents.acquirer")
 
 # MCP READ tools the Acquirer is permitted to call (discovery + triage). The
 # crawl_* write tools deliberately stay out of this filter — those belong to the
@@ -64,14 +66,23 @@ AcquirerRunner = Callable[[str], Awaitable[Union[str, list, dict]]]
 
 ROLE_PROMPT = """\
 You are the Acquirer in a local deep-research pipeline. You receive ONE subtopic
-question (plus the source classes it should draw evidence from) and produce a
-triaged list of candidate URLs to crawl. You do NOT crawl pages yourself and you
-do NOT invent URLs — you only discover and triage.
+question (plus the research depth and the source classes it should draw evidence
+from) and produce a triaged list of candidate URLs to crawl. You do NOT crawl
+pages yourself and you do NOT invent URLs — you only discover and triage.
+
+Your input arrives as plain text in this exact shape — the first two lines are
+metadata, the rest (after "Question:") is the actual research question to search
+for. Never search for the metadata lines themselves:
+
+  Depth: shallow | normal | deep
+  Source classes: web, academic, code, seed (comma-separated subset)
+  Question: <the subtopic question — this is what you pass to discover_urls>
 
 Your job, in order:
-1. Call the `discover_urls` tool with the subtopic question to gather candidate
-   URLs across the requested source classes (web search, DuckDuckGo, arXiv).
-2. Call the `score_and_triage_urls` tool on those candidates. It scores each URL
+1. FIRST, call the `discover_urls` tool with the subtopic question to gather candidate
+   URLs across the requested source classes (web search, DuckDuckGo, arXiv),
+   max_results_per_source = 3 and max_total =10.
+2. Second, call the `score_and_triage_urls` tool on those candidates. It scores each URL
    for relevance and assigns a crawl `strategy`.
 3. Return the triaged candidates as a JSON array of ScoredURL records. Each record:
 
@@ -84,9 +95,22 @@ Your job, in order:
      "etld1": "the registrable domain"
    }
 
+Example of a correct run (your only allowed actions):
+  input:  Depth: normal
+          Source classes: web
+          Question: What are the trade-offs of vector databases?
+  step 1: call tool discover_urls(query="What are the trade-offs of vector databases?", max_total=10, max_results_per_source=3, ...)
+  step 2: call tool score_and_triage_urls(urls=[...the discovered URLs...])
+  step 3: final response is EXACTLY the triaged records as a JSON array:
+          [{"url": "https://example.com/a", "score": 0.9, "strategy": "crawl_url",
+            "source": "web_search", "also_in": [], "etld1": "example.com"}]
+
 Rules:
-- Use ONLY the `discover_urls` and `score_and_triage_urls` tools. You hold no
-  crawl tools — never attempt to crawl or fetch page content.
+- Your FIRST action MUST be a `discover_urls` tool call. Never respond with text
+  before calling it. Your ONLY job is to call `discover_urls` then
+  `score_and_triage_urls` and return their triaged result as JSON — you never
+  answer, summarize, or discuss the question itself.
+- You hold no crawl tools — never attempt to crawl or fetch page content.
 - Deduplicate URLs: one record per URL. If several discovery sources found the
   same URL, keep one record and list the extra sources in `also_in`.
 - Do not fabricate scores or strategies — use what the triage tool returns.
@@ -94,6 +118,18 @@ Rules:
 - CRITICAL: If a tool fails or returns no results, output an empty JSON array: []
 - CRITICAL: Never output prose, markdown fences, or explanations — raw JSON only.
 """
+
+
+def build_acquirer_prompt(question: str, *, depth: Depth, source_classes) -> str:
+    """Render the plain-text prompt the Acquirer's ``ROLE_PROMPT`` expects.
+
+    Depth and source classes are conveyed as a short natural-language prefix
+    (not a JSON envelope) so a small local model can read them the same way it
+    reads the question itself — mirrors how the Verifier receives plain
+    ``subtopic.question`` text.
+    """
+    classes = ", ".join(c.value for c in source_classes)
+    return f"Depth: {depth.value}\nSource classes: {classes}\nQuestion: {question}"
 
 
 # ── citation BFS guard (architecture.md §11) ──────────────────────────────────
@@ -125,7 +161,7 @@ def parse_scored_urls(raw: Union[str, list, dict, ScoredURL]) -> list[ScoredURL]
     single mapping, or already-built ``ScoredURL`` instances — so callers can hand
     back whatever the runner produced. Returns validated ``ScoredURL`` records.
     """
-    print(f"Raw: {raw}")
+    logger.debug("acquirer raw output: %r", raw)
     if isinstance(raw, str):
         raw = loads_first_json(raw)
     if isinstance(raw, ScoredURL):
@@ -223,33 +259,14 @@ async def enrich_with_citations(
 def _build_default_toolset() -> BaseToolset:
     """Construct the real crawl4ai ``MCPToolset`` (stdio subprocess), READ tools only.
 
-    Imported lazily because ``mcp`` is an optional ADK extra: keeping the import
-    out of module scope lets the orchestrator (and the offline unit tests) load
-    this module — and inject a fake toolset — without ``mcp`` installed.
-
     ``tool_filter`` restricts the agent to the discovery/triage read tools; the
-    ``crawl_*`` write tools belong to the Extractor (least-privilege, §1).
+    ``crawl_*`` write tools belong to the Extractor (least-privilege, §1). The
+    shared construction body (and its lazy ``mcp`` import) lives in
+    ``crawl4ai_toolset.build_crawl4ai_toolset``.
     """
-    from google.adk.tools.mcp_tool import MCPToolset, StdioConnectionParams
-    from mcp import StdioServerParameters
+    from .crawl4ai_toolset import build_crawl4ai_toolset
 
-    server_cwd_path = Path(config.MCP_SERVER_CWD).resolve()
-    server_cwd = str(server_cwd_path)
-    # Use the venv python directly to avoid `uv run` startup overhead (~2-4 s on
-    # Windows), which causes the default 5 s StdioConnectionParams timeout to fire
-    # before the MCP server finishes initializing inside the uvicorn event loop.
-    venv_python = str(server_cwd_path / ".venv" / "Scripts" / "python.exe")
-    return MCPToolset(
-        connection_params=StdioConnectionParams(
-            server_params=StdioServerParameters(
-                command=venv_python,
-                args=["main.py"],
-                cwd=server_cwd,
-            ),
-            timeout=500.0,
-        ),
-        tool_filter=list(ACQUIRER_TOOL_NAMES),
-    )
+    return build_crawl4ai_toolset(list(ACQUIRER_TOOL_NAMES))
 
 
 def build_acquirer(toolset: Optional[BaseToolset] = None) -> LlmAgent:
@@ -271,6 +288,7 @@ def build_acquirer(toolset: Optional[BaseToolset] = None) -> LlmAgent:
         role_prompt=ROLE_PROMPT,
         tools=[active_toolset],
         output_key=OUTPUT_KEY,
+        generate_content_config=DETERMINISTIC_CONFIG,
     )
 
 
@@ -297,6 +315,7 @@ async def _default_runner(subtopic_question: str) -> str:
     for event in runner.run(
         user_id="orchestrator", session_id="acquire", new_message=message
     ):
+        logger.debug("acquirer event: %s", event)
         if event.is_final_response() and event.content and event.content.parts:
             final_text = "".join(p.text or "" for p in event.content.parts)
 
@@ -335,7 +354,10 @@ async def acquire(
     ``scorer`` is the optional LLM relevance gate threaded into the BFS (§11).
     """
     invoke = runner or _default_runner
-    raw = await invoke_json_with_retry(invoke, subtopic.question)
+    prompt = build_acquirer_prompt(
+        subtopic.question, depth=plan.depth, source_classes=subtopic.source_classes
+    )
+    raw = await invoke_json_with_retry(invoke, prompt)
     try:
         scored_urls = parse_scored_urls(raw)
     except ValueError:

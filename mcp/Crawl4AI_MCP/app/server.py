@@ -6,17 +6,32 @@ Start with: uv run python -m app.server
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastmcp import FastMCP
 
 from app.common import register_all
 from app.config import config
+from app.crawler import close_crawler
 
 # Ensure data directories exist on startup
 config.ensure_data_dirs()
 
+
+@asynccontextmanager
+async def _lifespan(_server: FastMCP):
+    """Server lifecycle: the shared crawler starts lazily on first crawl (see
+    app.crawler); here we ensure it is closed once on shutdown."""
+    try:
+        yield
+    finally:
+        await close_crawler()
+
+
 # Create the FastMCP server
 mcp = FastMCP(
     config.SERVER_NAME,
+    lifespan=_lifespan,
     instructions=(
         "Crawl4AI Research MCP Server. "
         "Provides web crawling, URL triage, deep/adaptive crawling, "

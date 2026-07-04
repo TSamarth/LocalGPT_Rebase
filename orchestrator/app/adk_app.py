@@ -16,16 +16,22 @@ from __future__ import annotations
 
 from google.adk.apps import App, ResumabilityConfig
 
+from .config import config
 from .session_exporter import SessionExporterPlugin
+from .trace_plugin import TracePlugin
 from .workflow import build_research_workflow
+
+# Pure observers, ride on the App so the server-built runner (which bypasses
+# ``build_runner``'s ``plugins=``) still gets them. Both __init__s only build
+# ``Path``s — import stays offline-safe and never reaches Ollama. TracePlugin is
+# gated on config.TRACE_ENABLED (default True).
+_plugins = [SessionExporterPlugin()]
+if config.TRACE_ENABLED:
+    _plugins.append(TracePlugin())
 
 app = App(
     name="localgpt_research",
     root_agent=build_research_workflow(),
     resumability_config=ResumabilityConfig(is_resumable=True),
-    # Exporter rides on the App so the server-built runner (which bypasses
-    # ``build_runner``'s ``plugins=``) still projects artifacts to disk.
-    # ``SessionExporterPlugin.__init__`` only builds a ``Path`` — import stays
-    # offline-safe and never reaches Ollama.
-    plugins=[SessionExporterPlugin()],
+    plugins=_plugins,
 )

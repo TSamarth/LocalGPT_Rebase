@@ -27,7 +27,7 @@ from typing import Dict, List
 
 from google.adk.agents import LlmAgent
 
-from ..llm import build_agent
+from ..llm import WRITER_CONFIG, build_agent
 from ..schemas import (
     Claim,
     ClaimLedger,
@@ -88,6 +88,7 @@ def build_writer(*, output_key: str = "report_markdown") -> LlmAgent:
         name="writer",
         role_prompt=WRITER_ROLE_PROMPT,
         output_key=output_key,
+        generate_content_config=WRITER_CONFIG,
     )
 
 

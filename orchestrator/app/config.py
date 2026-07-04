@@ -27,6 +27,10 @@ def _env_float(key: str, default: float) -> float:
     return float(os.getenv(key, str(default)))
 
 
+def _env_bool(key: str, default: bool) -> bool:
+    return os.getenv(key, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Config:
     # ── App ──────────────────────────────────────────────────────────────────
@@ -69,6 +73,17 @@ class Config:
     MCP_SERVER_CWD: str = field(
         default_factory=lambda: _env("MCP_SERVER_CWD", "../mcp/Crawl4AI_MCP")
     )
+    # ``StdioConnectionParams.timeout`` for the crawl4ai toolset (M1). ADK reads
+    # this SINGLE value for BOTH the stdio startup/``initialize`` handshake AND
+    # the per-tool-call read timeout (session_context.py bakes it into the
+    # ClientSession ``read_timeout_seconds``), so it cannot be split into a
+    # generous startup grace + a tight per-call ceiling without subclassing ADK's
+    # session manager. 180 s comfortably covers cold-start import + a page (the
+    # crawl4ai server self-bounds each page via PAGE_TIMEOUT_MS=30 s) while cutting
+    # the worst-case hung-page hold from the old 500 s (~8.3 min) to 3 min.
+    MCP_TOOL_TIMEOUT_SEC: float = field(
+        default_factory=lambda: _env_float("MCP_TOOL_TIMEOUT_SEC", 180.0)
+    )
 
     # ── Storage / artifacts (architecture.md §5) ───────────────────────────────
     SESSIONS_DIR: str = field(
@@ -81,6 +96,33 @@ class Config:
     # ``aiosqlite`` driver. Override via SESSION_DB_URL env var for prod.
     SESSION_DB_URL: str = field(
         default_factory=lambda: _env("SESSION_DB_URL", "sqlite+aiosqlite:///./data/sessions.db")
+    )
+    # Session retention (M4): prune sessions + exports older than this many days
+    # when the maintenance command runs. 0 = disabled (keep everything) — the
+    # default, so no automatic deletion ever happens without an explicit command.
+    SESSION_RETENTION_DAYS: int = field(
+        default_factory=lambda: _env_int("SESSION_RETENTION_DAYS", 0)
+    )
+
+    # ── Tracing / monitoring ───────────────────────────────────────────────────
+    # TracePlugin: per-session JSONL trace of agent/model/tool activity at
+    # {SESSIONS_DIR}/{session_id}/trace.jsonl.
+    TRACE_ENABLED: bool = field(
+        default_factory=lambda: _env_bool("TRACE_ENABLED", True)
+    )
+    # Truncation cap for logged prompt/response/tool payloads (chars per field).
+    TRACE_TRUNCATE_CHARS: int = field(
+        default_factory=lambda: _env_int("TRACE_TRUNCATE_CHARS", 4000)
+    )
+    # Opt-in raw litellm↔Ollama wire logging → {SESSIONS_DIR}/llm_raw.jsonl.
+    # Process-global (litellm callbacks), so off by default.
+    TRACE_LLM_RAW: bool = field(
+        default_factory=lambda: _env_bool("TRACE_LLM_RAW", False)
+    )
+
+    # Logging level for the ``orchestrator.*`` loggers (entrypoints configure it).
+    LOG_LEVEL: str = field(
+        default_factory=lambda: _env("LOG_LEVEL", "INFO")
     )
 
     # ── Research loop / stop-rule (architecture.md §4) ─────────────────────────
