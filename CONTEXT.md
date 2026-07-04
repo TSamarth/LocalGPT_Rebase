@@ -14,38 +14,38 @@ LocalGPT_Rebase/
 │   │   ├── config.py           # dataclass config loaded from env/.env
 │   │   ├── llm.py              # one-hot model factory (build_model / build_agent)
 │   │   │
-│   │   ├── # — v2 live (ADK 2.x dynamic-workflow shell) ——————————
+│   │   ├── # — v2 live (ADK 2.x dynamic-workflow shell, v1 shell fully retired E5.S1) ———
 │   │   ├── workflow.py         # @node research() — clarify→plan→CP1→loop→write→CP2
 │   │   ├── adk_app.py          # App(name="localgpt_research", ResumabilityConfig)
 │   │   ├── runner.py           # build_runner() factory; DatabaseSessionService (SQLite)
 │   │   ├── session_exporter.py # SessionExporterPlugin — on_event/after_run → disk JSON
-│   │   ├── research_policy.py  # pure stop_rule / merge_ledger / depth_budget (shared v1+v2)
+│   │   ├── research_policy.py  # pure stop_rule / merge_ledger / depth_budget
 │   │   ├── cp3_adapter.py      # apply_cp3_verbs — free-text CP3 reply → (urls, needs_supplemental)
-│   │   ├── server.py           # get_fast_api_app(a2a=True) + _mount_a2a (ADK 2.3.0 bug workaround)
-│   │   ├── cli.py              # thin httpx REST CLI: POST /run_sse + HITL via checkpoint + cp3_adapter
+│   │   ├── server.py           # get_fast_api_app(a2a=False) + _mount_a2a (ADK 2.3.0 bug workaround)
+│   │   ├── cli.py              # thin httpx REST CLI: POST /run_sse + inlined CP1/CP2 renderers + cp3_adapter
 │   │   ├── a2a_client_example.py  # RemoteA2aAgent(use_legacy=False) consumption seam (doc/example)
-│   │   │
-│   │   ├── # — v1 legacy (pending retire in E5) ——————————————————
+│   │   ├── trace_plugin.py     # TracePlugin — per-node/model/tool spans to a per-session trace file (NEW 2026-07-04)
+│   │   ├── maintenance.py      # opt-in session/export retention pruning, SESSION_RETENTION_DAYS (NEW 2026-07-04)
 │   │   ├── session.py          # SessionStore: create/resume, JSON export (demoted; exporter owns writes)
-│   │   ├── orchestrator.py     # v1 deterministic driver (retire E5)
-│   │   ├── stage_machine.py    # STAGE_ORDER, ResearchPhase; re-exports research_policy (retire E5)
-│   │   ├── pipeline.py         # v1 _run_sync bridge (retire E5)
-│   │   ├── checkpoint.py       # v1 console CP flows; still imported by v1 shell (retire E5)
 │   │   ├── jsonio.py           # JSON retry + degrade for agent output
 │   │   ├── citation.py         # Semantic Scholar BFS (httpx, not MCP)
 │   │   └── agents/             # six specialist LlmAgents (Clarifier/Planner/Acquirer/Extractor/Verifier/Writer)
+│   │       └── crawl4ai_toolset.py  # shared build_crawl4ai_toolset() + MCPSessionManager (per-invocation_id, resume-safe) (NEW 2026-07-04)
 │   ├── localgpt_research/      # ADK discovery shim: re-exports the resumable App + agent.json card
 │   ├── scripts/
-│   │   └── check_setup.py      # Gate G2 probe — verifies Ollama + models
-│   └── tests/                  # 273 passing tests (pytest, asyncio_mode=auto)
+│   │   ├── check_setup.py      # Gate G2 probe — verifies Ollama + models
+│   │   ├── mem_probe.py        # RSS sampler for live acceptance runs (psutil)
+│   │   └── acceptance_runbook.md  # user-run live-HW acceptance steps
+│   └── tests/                  # 253 collected / 249 passing offline (pytest, asyncio_mode=auto); rest @pytest.mark.live
 ├── mcp/
 │   └── Crawl4AI_MCP/           # FastMCP stdio server (fully implemented)
 │       ├── app/
-│       │   ├── server.py  # FastMCP entry; register_all() wires everything
-│       │   ├── common.py  # Single registration point for all tools
-│       │   ├── tools/     # discover, triage, crawl, deep_crawl, adaptive_crawl, search, seed, dedup
-│       │   └── storage/   # sqlite_store.py + chroma_store.py (lazy singletons)
-│       └── tests/         # 43 passing tests (offline suite, crawl4ai mocked)
+│       │   ├── server.py   # FastMCP entry; register_all() wires everything
+│       │   ├── common.py   # Single registration point for all tools
+│       │   ├── crawler.py  # persistent per-process AsyncWebCrawler (NEW 2026-07-04, replaces per-call launch/teardown)
+│       │   ├── tools/      # discover, triage, crawl, deep_crawl, adaptive_crawl, search, seed, dedup
+│       │   └── storage/    # sqlite_store.py + chroma_store.py (lazy singletons)
+│       └── tests/          # 43 passing tests (offline suite, crawl4ai mocked)
 ├── memory-bank/           # Project design docs (architecture, requirements, progress)
 └── claudedocs/            # Task hierarchy, workflow docs, and E-series execution plans
 ```
@@ -56,7 +56,7 @@ LocalGPT_Rebase/
 ```bash
 cd orchestrator
 uv sync                                  # install deps (pydantic, httpx, google-adk[a2a], etc.)
-uv run pytest tests/ -v                  # run all tests (273 green)
+uv run pytest tests/ -v                  # run all tests (253 collected / 249 passing offline; rest @pytest.mark.live)
 uv run pytest tests/test_schemas.py -v   # single test file
 python scripts/check_setup.py           # verify Ollama + model VRAM (Gate G2)
 uv run ruff check app/ tests/           # lint
@@ -82,7 +82,7 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 
 **Goal**: one query → vetted markdown research report. **Google ADK 2.x + A2A protocol** orchestrates 6 specialized agents. All inference is local via Ollama.
 
-> **Design version: v2 — implemented.** Target is **ADK 2.x dynamic workflows**, **ADK-owned sessions/resume**, **`RequestInput` HITL**, single **local-first A2A boundary** served via `app/server.py` (`get_fast_api_app(a2a=True)`). Migration steps E0–E4 are **committed to `dev`** (273 orchestrator + 43 MCP green, all 4 HARD GATES passed). Only **E5** remains: retire the v1 shell (`orchestrator.py` / `stage_machine.py` / `pipeline.py` / `checkpoint.py`). v1→v2 migration path: [architecture.md] §15. The contracts, agents, policy, and MCP layer are **unchanged** between v1 and v2 — only the orchestration shell + session ownership changed.
+> **Design version: v2 — implemented, migration closed.** **ADK 2.x dynamic workflows**, **ADK-owned sessions/resume**, **`RequestInput` HITL**, single **local-first A2A boundary** served via `app/server.py` (`get_fast_api_app(a2a=False)` + explicit `_mount_a2a`). Migration steps E0–E5 all **committed to `dev`** (v1 shell deleted; 253 collected / 249 passing offline + 43 MCP green). v1→v2 migration path (historical): [architecture.md] §15. Current work is post-migration hardening — resource-optimization pass (shared crawl4ai MCP subprocess across HITL resume, persistent crawler, retention pruning, tracing fixes): [architecture.md] §16.
 
 **Data flow**: `Clarifier → Planner →★CP1 → [Acquirer →★CP3? → Extractor → Verifier]* loop → Writer →★CP2`
 
@@ -96,7 +96,7 @@ uv run python e2e_test.py               # live test (needs Ollama + network)
 
 **Model strategy**: one hot Qwen2.5-14B role-prompted per agent + resident `nomic-embed-text:latest`. ~12.5 GB VRAM total. 16 GB RAM is the binding constraint — stages are strictly sequential to prevent OOM. This is also *why* the six stay **local sub-agents/nodes, not A2A peers** (A2A overhead buys no concurrency on one hot model). Set the **`OLLAMA_API_BASE` env var** at startup (LiteLLM routes non-generation calls through it).
 
-**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`, built **once per run and reused** across loop passes (then `close()`d in a `finally`) — not rebuilt per phase. Only Acquirer/Extractor/Verifier hold MCP tools (least-privilege). MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings). Agents handoff page IDs, not text. **MCP stays the tool boundary; it is not migrated to A2A.**
+**crawl4ai MCP** runs as a stdio subprocess attached via `ADK MCPToolset`, built through the shared `app/agents/crawl4ai_toolset.py` helper: an `MCPSessionManager` caches **one subprocess per `invocation_id`**, reused across loop passes AND HITL resume hops (released only on real error/completion, not on pause) — replaces the earlier "build once/run, close in finally" pattern. Only Acquirer/Extractor/Verifier hold MCP tools (least-privilege, differing only in `tool_filter`). MCP stores content in SQLite (`crawled_pages`, `chunks`) + ChromaDB (cosine embeddings), and holds a persistent per-process `AsyncWebCrawler` (`mcp/Crawl4AI_MCP/app/crawler.py`) instead of launching Chromium per call. Agents handoff page IDs, not text. **MCP stays the tool boundary; it is not migrated to A2A.**
 
 **A2A boundary (v2 — live)**: the whole pipeline is exposed as one unified server via `get_fast_api_app(a2a=True)` in `app/server.py`, binding **localhost:8001**, serving both REST (`/run_sse`) and A2A (card + RPC). The agent card lives at `/a2a/localgpt_research/.well-known/agent-card.json`. ADK 2.3.0 has a `json`-shadow bug that 404s the auto-mounted card — `_mount_a2a` works around it (guarded no-op for future ADK). Consumed locally either by the thin `app/cli.py` or another ADK agent via `RemoteA2aAgent(agent_card=…/.well-known/agent-card.json, use_legacy=False)`. Dep: `google-adk[a2a]>=2.3,<3`.
 

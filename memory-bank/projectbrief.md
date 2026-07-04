@@ -1,13 +1,13 @@
 # Project Brief: A2A Deep Research Pipeline
 
 ## Core Idea
-A local-first, agent-to-agent (A2A) deep research system. Takes a user query (one-liner or detailed description), runs multi-agent research over web/academic/code sources via a crawl4ai-backed MCP server using local Ollama models, and produces a **structured, vetted markdown report** covering all aspects of the query.
+Local-first, agent-to-agent (A2A) deep research system. Take user query (one-liner or detailed desc), run multi-agent research over web/academic/code sources via crawl4ai-backed MCP server using local Ollama models, produce **structured, vetted markdown report** covering all query aspects.
 
 ## Core Requirements
 - **Input**: user query — one-liner OR detailed description.
-- **Clarification brain**: STOP and ask follow-up only on (a) ambiguous scope or (b) missing constraints. Otherwise search autonomously. Clarify before run start only.
+- **Clarification brain**: STOP, ask follow-up only on (a) ambiguous scope or (b) missing constraints. Else search autonomously. Clarify before run start only.
 - **Adaptive depth**: scale research effort to query complexity (one-liner → shallow, detailed → deep).
-- **A2A orchestration**: specialized agents per stage; delegate only at stages requiring it to minimize resource load.
+- **A2A orchestration**: specialized agents per stage; delegate only at stages needing it, minimize resource load.
 - **Sources via crawl4ai MCP**: open web, academic/papers (arXiv/PDF), code/technical, user-provided URLs/files. Existing: multi-source URL aggregation from SerpAPI + DuckDuckGo + arXiv.
 - **Verification**: claim cross-corroborated by 2+ independent sources → keep; claim contradicted → flag (retain both sides, never silently resolve). Every kept claim traceable to source URL(s).
 - **Output**: single structured markdown report per session — exec summary → section per sub-topic → sources → contradictions appendix.
@@ -25,4 +25,4 @@ A local-first, agent-to-agent (A2A) deep research system. Takes a user query (on
 **Out (this phase)**: framework/architecture selection (deferred to design), implementation code, paywalled/authed sources (unless user-seeded), real-time/streaming feeds.
 
 ## Source of Truth
-This file defines scope. Detailed requirements in [requirements.md]. All other memory-bank files build on this.
+File defines scope. Detailed requirements in [requirements.md]. All other memory-bank files build on this.

@@ -1,6 +1,6 @@
 # Architecture: A2A Deep Research Pipeline
 
-Status: **DESIGN v2 (ratified 2026-06-23)** — commits project to **ADK 2.x**, **ADK-owned sessions**, **dynamic-workflow** orchestration, **single local-first A2A boundary**. Supersedes v1 hand-rolled-orchestrator design (Stories 1–5); §15 = migration path. Section numbers ≤ §12 preserved so existing `§`-references stay valid; §13–§15 new. Input review: [../claudedocs/adk_alignment_review.md]. Requirements: [requirements.md].
+Status: **DESIGN v2 (ratified 2026-06-23)** — commits project to **ADK 2.x**, **ADK-owned sessions**, **dynamic-workflow** orchestration, **single local-first A2A boundary**. Supersedes v1 hand-rolled-orchestrator design (Stories 1–5); §15 = migration path. Section numbers ≤ §12 kept so existing `§`-refs stay valid; §13–§15 new. Input review: [../claudedocs/adk_alignment_review.md]. Requirements: [requirements.md].
 
 ---
 
@@ -11,14 +11,14 @@ Status: **DESIGN v2 (ratified 2026-06-23)** — commits project to **ADK 2.x**, 
 | Decision | Choice | Why |
 |----------|--------|-----|
 | Framework + major | **Google ADK, pinned `>=2.3,<3`** | Already running ADK 2.3.0 (uv.lock); 2.0 GA'd 2026-05-19. Loose `>=0.3.0` floor spanned 1.x→2.0 break — must pin (review §0.2). |
-| Orchestration substrate | **ADK 2.0 dynamic workflows** (`@node` / `Workflow` / `ctx.run_node`) | Near-1:1 fit for hand-rolled stage machine + research loop; gives automatic checkpoint-resume + native ADK sessions; retires `orchestrator.py` / `stage_machine.py` / `_run_sync` (review §2). |
+| Orchestration substrate | **ADK 2.0 dynamic workflows** (`@node` / `Workflow` / `ctx.run_node`) | Near-1:1 fit for hand-rolled stage machine + research loop; gives auto checkpoint-resume + native ADK sessions; retires `orchestrator.py` / `stage_machine.py` / `_run_sync` (review §2). |
 | Session & resume ownership | **ADK session + event store** (`ResumabilityConfig(is_resumable=True)`) | ADK persists step/event state; resume re-runs only unfinished nodes. `data/sessions/{id}/*.json` demoted to **write-through export**, not source of truth (§5). |
-| Inter-agent topology | **Local sub-agents / workflow nodes** on one hot model | Six specialists share one resident model, run sequentially (16 GB RAM). ADK's A2A guidance: in-process, shared-model, performance-coupled agents should be *local sub-agents*, **not** A2A peers — A2A network+serialization overhead buys nothing here. |
-| A2A boundary | **One A2A server at pipeline edge, local-first** | Whole Deep-Research pipeline exposed as single `A2AServer` (auto agent card), consumable over **localhost** by local client or another ADK agent via `RemoteA2aAgent`. Real A2A contract at edge; no internal A2A overhead (§13). |
-| Runtime / front-end | **`adk api_server` (local service)** + thin CLI | A2A exposure, `RequestInput` HITL over API/SSE, resume-by-`invocation_id` all work natively. Single box, local Ollama — no cloud. |
+| Inter-agent topology | **Local sub-agents / workflow nodes** on one hot model | Six specialists share one resident model, run sequentially (16 GB RAM). ADK's A2A guidance: in-process, shared-model, performance-coupled agents = *local sub-agents*, **not** A2A peers — A2A network+serialization overhead buys nothing here. |
+| A2A boundary | **One A2A server at pipeline edge, local-first** | Whole Deep-Research pipeline exposed as single `A2AServer` (auto agent card), reachable over **localhost** by local client or another ADK agent via `RemoteA2aAgent`. Real A2A contract at edge; no internal A2A overhead (§13). |
+| Runtime / front-end | **`adk api_server` (local service)** + thin CLI | A2A exposure, `RequestInput` HITL over API/SSE, resume-by-`invocation_id` all work native. Single box, local Ollama — no cloud. |
 | Tool transport | **MCP (unchanged)** | crawl4ai stays stdio `MCPToolset`. MCP = right boundary for tools; A2A = right boundary for agent. |
 
-**Binding constraint (unchanged):** 16 GB **RAM** (not VRAM) = limit ⇒ **sequential, single-hot-model** execution regardless of logical node count. Why six are local nodes, not A2A microservices.
+**Binding constraint (unchanged):** 16 GB **RAM** (not VRAM) = limit ⇒ **sequential, single-hot-model** run regardless of node count. Why six stay local nodes, not A2A microservices.
 
 ---
 
@@ -33,15 +33,15 @@ One hot reasoning model + one hot embedding model. No swap thrash.
 | KV cache / context (8–16k) | — | ~2–4 GB | Fits remaining headroom. |
 
 - **VRAM budget**: 14B(9) + embed(0.5) + KV(3) ≈ 12.5 GB of 16 GB. Safe.
-- **RAM discipline**: crawl4ai/Playwright = RAM hog. Never run heavy crawl concurrently with large-batch inference — structural; nodes run sequentially.
+- **RAM discipline**: crawl4ai/Playwright = RAM hog. Never run heavy crawl same time as big-batch inference — structural; nodes run sequential.
 - **One model, many roles**: nodes differ by system prompt + tool access, not model. Via ADK `LiteLlm` → local Ollama with `ollama_chat/` provider prefix.
-- **Connectivity (review §0.1):** set **`OLLAMA_API_BASE` env var** (not only `api_base` param) at startup — LiteLLM routes non-generation calls through env var. Without it, non-default `OLLAMA_BASE_URL` silently hits localhost.
+- **Connectivity (review §0.1):** set **`OLLAMA_API_BASE` env var** (not only `api_base` param) at startup — LiteLLM routes non-generation calls through env var. Skip it, non-default `OLLAMA_BASE_URL` silently hits localhost.
 
 ---
 
 ## 2. Agent Topology: Local Nodes Under One A2A Boundary
 
-**Pattern: dynamic-workflow root composes single-responsibility specialist nodes; whole pipeline = one A2A-exposed agent.** Specialists = local nodes (in-process, one hot model), never A2A peers, never calling each other directly — data flows through workflow.
+**Pattern: dynamic-workflow root composes single-responsibility specialist nodes; whole pipeline = one A2A-exposed agent.** Specialists = local nodes (in-process, one hot model), never A2A peers, never call each other direct — data flows through workflow.
 
 ```
         localhost A2A client  /  another ADK agent (RemoteA2aAgent)
@@ -69,18 +69,18 @@ One hot reasoning model + one hot embedding model. No swap thrash.
                             └───────────────────────────────────┘
 ```
 
-**Least-privilege tool access (unchanged):** only **Acquirer** (read: `discover_urls`, `score_and_triage_urls`) and **Extractor** (write: `crawl_*`) and **Verifier** (read: `search_chunks`) hold MCP tools; Clarifier/Planner/Writer = reasoning-only. `MCPToolset` for each built **once per run and reused** across loop passes, then `close()`d at run end (review §0.3) — no per-pass subprocess churn.
+**Least-privilege tool access (unchanged):** only **Acquirer** (read: `discover_urls`, `score_and_triage_urls`) and **Extractor** (write: `crawl_*`) and **Verifier** (read: `search_chunks`) hold MCP tools; Clarifier/Planner/Writer = reasoning-only. `MCPToolset` per each built **once per run, reused** across loop passes, `close()`d at run end (review §0.3) — no per-pass subprocess churn.
 
 ---
 
 ## 3. Agent Roles & Contracts
 
-Each specialist: single responsibility, typed input artifact → typed output artifact. Schemas (`orchestrator/app/schemas.py`, Pydantic v2) = **inter-node contracts**, unchanged by v2 design — only *call mechanism* changes (node invoked via `await ctx.run_node(agent, input)`, returns output directly; no throwaway `Runner`/session extraction).
+Each specialist: single responsibility, typed input artifact → typed output artifact. Schemas (`orchestrator/app/schemas.py`, Pydantic v2) = **inter-node contracts**, unchanged by v2 design — only *call mechanism* changes (node invoked via `await ctx.run_node(agent, input)`, returns output direct; no throwaway `Runner`/session extraction).
 
 ### 3.1 Root workflow (`@node` dynamic workflow, replaces v1 orchestrator agent)
 - Owns: control flow (stage order + research loop), stop-rule, checkpoint placement.
 - Does **not** own session/resume persistence — ADK does (§5).
-- Does **not** crawl or reason about content — pure control. Deterministic Python; LLMs decide content, not control.
+- Does **not** crawl or reason on content — pure control. Deterministic Python; LLMs decide content, not control.
 
 ### 3.2 Clarifier (FR1)
 - In: raw user query.
@@ -110,22 +110,22 @@ Each specialist: single responsibility, typed input artifact → typed output ar
 - In: subtopic; retrieves own chunks via `search_chunks` (includes chunk `publication_date`).
 - **Model owns content** (which chunks support/contradict; 0–1 methodological-explicitness signal). **Deterministic Python owns policy** — re-applied to every parsed ledger:
   - **Independence** (Open Q2): different **eTLD+1** AND content cosine < `INDEPENDENCE_COSINE_THRESHOLD` (0.92).
-  - **Claim status**: ≥2 independent → **kept**; independent contradiction → **flagged** (retain all sides); single → **uncorroborated**.
+  - **Claim status**: ≥2 independent → **kept**; independent contradiction → **flagged** (keep all sides); single → **uncorroborated**.
   - **Contradiction confidence** (FR5.5): three-tier additive rubric (§12.1) → `confidence_score`.
   - **Temporal drift** (FR5.6): date gap ≥ `TEMPORAL_DRIFT_THRESHOLD_MONTHS` (18) → `conflict_type="temporal_drift"` + `temporal_status` (§12.2).
 - Out: `ClaimLedger` (claims with status, temporal_status, sources, contradictions{confidence_score, conflict_type}).
 
 ### 3.7 Writer (FR6)
 - In: `ClaimLedger` + `ResearchPlan`.
-- Out: structured markdown — exec summary → section per subtopic → sources → contradictions appendix (factual/methodological vs. separate **Temporal Drift** sub-section). Every kept claim cites source URL(s).
-- Deterministic coverage check (FR6.3): every plan subtopic appears; gaps surfaced explicitly (model-free skeleton).
+- Out: structured markdown — exec summary → section per subtopic → sources → contradictions appendix (factual/methodological vs separate **Temporal Drift** sub-section). Every kept claim cites source URL(s).
+- Deterministic coverage check (FR6.3): every plan subtopic shows up; gaps surfaced plain (model-free skeleton).
 - → **Checkpoint 2** → final write.
 
 ---
 
 ## 4. Orchestration: Dynamic Workflow + Research Loop
 
-Control flow = single ADK **dynamic workflow** (`@node`), not hand-rolled driver. Nodes invoked with `await ctx.run_node(...)`, return value *is* node output — eliminates v1 `asyncio.run` bridge and manual `output_key`-from-discarded-session extraction.
+Control flow = single ADK **dynamic workflow** (`@node`), not hand-rolled driver. Nodes invoked with `await ctx.run_node(...)`, return value *is* node output — kills v1 `asyncio.run` bridge + manual `output_key`-from-discarded-session pull.
 
 ```python
 # sketch — orchestrator/app/workflow.py (v2 target)
@@ -161,11 +161,11 @@ async def research(ctx: Context, raw_query: str) -> str:
 root_agent = Workflow(name="deep_research", edges=[("START", research)])
 ```
 
-**Stage identity preserved.** Canonical stage names (`INTAKE → CLARIFY → PLAN → RESEARCH(ACQUIRE→[MID_ACQUIRE]→EXTRACT→VERIFY) → SYNTHESIZE → WRITE → DONE`) remain shared vocabulary + resume/observability anchors; in v2 = positions in workflow graph, not hand-walked `Stage` enum entries.
+**Stage identity kept.** Canonical stage names (`INTAKE → CLARIFY → PLAN → RESEARCH(ACQUIRE→[MID_ACQUIRE]→EXTRACT→VERIFY) → SYNTHESIZE → WRITE → DONE`) stay shared vocab + resume/observability anchors; in v2 = positions in workflow graph, not hand-walked `Stage` enum entries.
 
-**Stop-rule (resolves Open Q5, unchanged, pure):** subtopic done when corroborated-claim count ≥ `target_evidence`, OR pass adds `< MIN_NEW_CLAIMS` (diminishing returns), OR per-subtopic iteration cap (`depth_budget`). Pure functions (`stop_rule`, `depth_budget`) port to v2 verbatim as inline calls / function-nodes.
+**Stop-rule (resolves Open Q5, unchanged, pure):** subtopic done when corroborated-claim count ≥ `target_evidence`, OR pass adds `< MIN_NEW_CLAIMS` (diminishing returns), OR per-subtopic iteration cap (`depth_budget`). Pure functions (`stop_rule`, `depth_budget`) port to v2 as-is (inline calls / function-nodes).
 
-**Resume semantics:** dynamic workflows checkpoint every node execution; on resume, completed nodes skipped automatically. Parent nodes calling `ctx.run_node` must set `rerun_on_resume=True`. Tools may run **at least once** (possibly more) on resume — crawl/extract are idempotent (content keyed by URL in Chroma), so re-runs safe; explicit design invariant to preserve.
+**Resume semantics:** dynamic workflows checkpoint every node run; on resume, done nodes skip auto. Parent nodes calling `ctx.run_node` must set `rerun_on_resume=True`. Tools may run **at least once** (maybe more) on resume — crawl/extract idempotent (content keyed by URL in Chroma), re-runs safe; keep this invariant.
 
 ---
 
@@ -173,18 +173,18 @@ root_agent = Workflow(name="deep_research", edges=[("START", research)])
 
 - **Source of truth = ADK session + event store.** Live stage, current subtopic, budgets, per-node completion live in ADK session; resume driven by ADK via `App(resumability_config=ResumabilityConfig(is_resumable=True))` + run's `invocation_id`.
 - **crawl4ai SQLite + ChromaDB**: all crawled content + provenance + `publication_date`. Reused as-is; unaffected by session-ownership change.
-- **`data/sessions/{id}/*.json` = export, not truth.** `plan.json`, `claim_ledger.json`, `draft.md` written **through** ADK state (thin after-node/after-agent callback or plugin projects ADK state to disk) for human inspection, diffing, report provenance. `stage.json` retired as resume mechanism — ADK owns resume. Final report lands at `data/reports/{session_id}.md`.
+- **`data/sessions/{id}/*.json` = export, not truth.** `plan.json`, `claim_ledger.json`, `draft.md` written **through** ADK state (thin after-node/after-agent callback or plugin projects ADK state to disk) for human check, diffing, report provenance. `stage.json` retired as resume mechanism — ADK owns resume. Final report lands at `data/reports/{session_id}.md`.
 - **Migration note:** v1 `SessionStore` becomes **exporter** (write-through projection), not persistence/resume engine. See §15.
 
 ---
 
 ## 6. Checkpoint UX (resolves Open Q6 — v2: `RequestInput` HITL)
 
-Human gates = ADK **`RequestInput`** nodes that pause workflow + resume on user response — over `adk api_server` (API/SSE), not bound to local TTY.
+Human gates = ADK **`RequestInput`** nodes that pause workflow + resume on user answer — over `adk api_server` (API/SSE), not tied to local TTY.
 
 - **CP1 (after Planner):** `yield RequestInput(message=..., payload=plan, response_schema=ResearchPlan)` → approve/edit/reject plan.
 - **CP2 (after Writer):** approve/edit/reject draft.
-- **CP3 (after Acquirer, `plan.depth == "deep"` only):** inspect/steer candidate source list before extraction; add/exclude/redirect URLs. `[+]`/`[r]` edit triggers supplemental Acquirer pass (loop re-entry) before Extractor runs.
+- **CP3 (after Acquirer, `plan.depth == "deep"` only):** check/steer candidate source list before extraction; add/exclude/redirect URLs. `[+]`/`[r]` edit triggers extra Acquirer pass (loop re-entry) before Extractor runs.
 - **Pre-flight clarification** (Clarifier `needs_input`): `RequestInput` *before run start only*.
 
 **Local-first interaction:** same workflow runs two ways — (a) thin **CLI** drives in-process for terminal use, (b) `adk api_server` for API/A2A/remote-HITL. `RequestInput`'s `response_schema` does **not** auto-coerce free-form human input, so CP3's URL-edit grammar needs small normalizing adapter (or agent node) between raw input and structured payload.
@@ -193,11 +193,11 @@ Human gates = ADK **`RequestInput`** nodes that pause workflow + resume on user 
 
 ## 7. crawl4ai MCP Extensions (resolves Open Q3 — unchanged)
 
-Targeted additions to existing server (extend, don't rebuild — most already shipped in Story 2):
-1. **Content-similarity dedup** — collapse syndicated/mirrored pages (cosine ≥ 0.92) so independence test reliable. *(shipped: `tools/dedup.py`)*
+Targeted adds to existing server (extend, don't rebuild — most already shipped in Story 2):
+1. **Content-similarity dedup** — collapse syndicated/mirrored pages (cosine ≥ 0.92) so independence test holds. *(shipped: `tools/dedup.py`)*
 2. **eTLD+1 field** — registrable domain on discovery output + chunk metadata. *(shipped: `app/domain.py`, `chunks.etld1`)*
 3. **Seed-URL ingest** — force user URLs/files into crawl set (FR3.2). *(shipped: `tools/seed.py`)*
-4. **PDF/arXiv extraction quality** — validate/improve PDF→markdown. *(shipped: routing in `crawl.py`/`adaptive_crawl.py`)*
+4. **PDF/arXiv extraction quality** — check/improve PDF→markdown. *(shipped: routing in `crawl.py`/`adaptive_crawl.py`)*
 5. **Rate-limit/backoff** — per-domain politeness + 429 retry. *(shipped: `app/ratelimit.py`)*
 6. **Semantic Scholar citation-graph client** — `orchestrator/app/citation.py` httpx utility (not MCP tool), called by Acquirer for §11/§12. *(shipped)*
 
@@ -234,7 +234,7 @@ user query (via CLI or A2A/api_server)
 - ✅ Deterministic control flow (dynamic workflow + pure stop-rule) wrapping LLM reasoning — LLMs decide *content*, not *control*.
 - ✅ Resource-aware: one hot model, sequential nodes, bounded crawl concurrency, MCP subprocess reused.
 - ✅ Human-in-loop as explicit blocking `RequestInput` gates (API-resumable).
-- ✅ **A2A used correctly**: one boundary at pipeline edge (local-first), specialists kept local — not A2A microservices.
+- ✅ **A2A used right**: one boundary at pipeline edge (local-first), specialists stay local — not A2A microservices.
 - ✅ Exceptions propagate to ADK `RetryConfig`; never catch `BaseException` (breaks HITL `NodeInterruptedError`).
 
 ---
@@ -280,10 +280,10 @@ for each academic ScoredURL in initial discovery:
 ## 12. Enhanced Verification Design (P2 + P4) — unchanged
 
 ### 12.1 Contradiction Confidence Scoring (P2)
-Each contradiction carries `confidence_score: float [0,1]` + `conflict_type: factual|methodological|temporal_drift`. **Three-tier additive rubric** (each 0–0.33): (1) source independence (different eTLD+1 + low cosine → higher; same domain = 0), (2) recency delta (both recent → higher; large gap → drift, not factual), (3) methodological explicitness (cites data/methods → higher; LLM-supplied). Appendix sorted by score descending.
+Each contradiction carries `confidence_score: float [0,1]` + `conflict_type: factual|methodological|temporal_drift`. **Three-tier additive rubric** (each 0–0.33): (1) source independence (different eTLD+1 + low cosine → higher; same domain = 0), (2) recency delta (both recent → higher; big gap → drift, not factual), (3) methodological explicitness (cites data/methods → higher; LLM-supplied). Appendix sorted score descending.
 
 ### 12.2 Temporal Drift Detection (P4)
-`publication_date` flows S2 → `ScoredURL` → chunk metadata → Verifier. Date gap ≥ `TEMPORAL_DRIFT_THRESHOLD_MONTHS` (18) → `conflict_type="temporal_drift"`; older side `temporal_status="dated"`, newer `"current"`. Missing date → `"uncertain"`, never classified as drift. Report: separate "Temporal Drift" sub-section, informational framing ("field has evolved since [date]") — AC7.
+`publication_date` flows S2 → `ScoredURL` → chunk metadata → Verifier. Date gap ≥ `TEMPORAL_DRIFT_THRESHOLD_MONTHS` (18) → `conflict_type="temporal_drift"`; older side `temporal_status="dated"`, newer `"current"`. Missing date → `"uncertain"`, never classed as drift. Report: separate "Temporal Drift" sub-section, informational framing ("field has evolved since [date]") — AC7.
 
 ---
 
@@ -291,11 +291,11 @@ Each contradiction carries `confidence_score: float [0,1]` + `conflict_type: fac
 
 > **As built (E4/P5, 2026-06-27):** landed exposure = **unified `get_fast_api_app(a2a=True)`** factory (`app/server.py`) — one localhost:8001 process serving **both** REST (`/run_sse`, session CRUD, `/list-apps`) **and** A2A protocol (card + RPC), chosen over `to_a2a` (A2A-only, no `/run_sse`). App name landed as **`localgpt_research`** (`deep_research` below = design-time placeholder); card at `/a2a/localgpt_research/.well-known/agent-card.json` with `text/plain` in / `text/markdown` out + A2A new-executor extension advertised. ADK 2.3.0 `json`-shadow bug 404s auto-mounted card → hand-rolled `_mount_a2a` (future-ADK-safe guard). HITL pause/resume proven over A2A protocol itself (HARD GATE) + REST resume-by-`invocation_id`. CLI = `app/cli.py`; `RemoteA2aAgent(use_legacy=False)` example = `app/a2a_client_example.py`. Specialists NOT split onto own servers (seam only). Detail: [../claudedocs/spawn_v1_to_v2_migration.md] E4 + [../claudedocs/E4_execution_plan.md].
 
-**Intent:** A2A = project's reason for choosing ADK, applied where it pays off — at **pipeline boundary**, not between six co-resident specialists (ADK guidance + RAM constraint, §0/§2).
+**Intent:** A2A = reason project picked ADK, applied where it pays off — at **pipeline boundary**, not between six co-resident specialists (ADK guidance + RAM constraint, §0/§2).
 
-**Exposure (one of two equivalent paths):**
-- **`to_a2a(root_agent, port=8001)`** — wraps root workflow into A2A Starlette app served by `uvicorn`; auto-generates agent card in-memory. Tightest control over what is exposed.
-- **`adk api_server --a2a <folder>`** with `agent-card.json` — also gives `adk web` for debug/test; can host multiple agents from one parent folder. Preferred when api_server is already runtime.
+**Exposure (one of two equal paths):**
+- **`to_a2a(root_agent, port=8001)`** — wraps root workflow into A2A Starlette app served by `uvicorn`; auto-gens agent card in-memory. Tightest control on what gets exposed.
+- **`adk api_server --a2a <folder>`** with `agent-card.json` — also gives `adk web` for debug/test; can host multi agents from one parent folder. Preferred when api_server already runtime.
 
 Agent card published at well-known path (`…/a2a/deep_research/.well-known/agent-card.json`), advertising pipeline's skill ("local deep-research → vetted markdown report") + `text/plain` in / `text/markdown` (or `application/json`) out.
 
@@ -332,7 +332,7 @@ Agent card published at well-known path (`…/a2a/deep_research/.well-known/agen
 
 Code today = v1 (Stories 1–5: `orchestrator.py`, `stage_machine.py` driver, `pipeline.py` `_run_sync`, `SessionStore` as truth, console `checkpoint.py`). Deterministic policy + agents + schemas + MCP carry over unchanged; only orchestration shell changes. Suggested sequence (design-level; execute via `/sc:implement`).
 
-> **Status (2026-06-27):** steps 1–6 ✅ done (committed to `dev`, 273 orchestrator + 43 MCP green; all 4 HARD GATES passed); step 7 (retire v1 shell) + real-HW acceptance pending = E5. Per-step execution detail in [../claudedocs/spawn_v1_to_v2_migration.md] *Execution Log*.
+> **Status (2026-06-30): all 7 steps ✅ done.** v1 shell (`orchestrator.py`/`stage_machine.py`/`pipeline.py`/`checkpoint.py`) deleted (E5.S1, 2026-06-28); live acceptance harness code-complete (E5.S2/P7, 2026-06-30) — user still owns running `pytest -m live` on real HW. Per-step execution detail in [../claudedocs/spawn_v1_to_v2_migration.md] *Execution Log*. Migration itself is closed; see §16 for post-migration hardening work.
 
 1. ✅ **Tier 0 correctness first** (review §0): set `OLLAMA_API_BASE`; pin `google-adk>=2.3,<3`; build each `MCPToolset` once/run + `close()`. Independent of rewrite, de-risks env.
 2. ✅ **Stand up `App` + one-node `Workflow`** wrapping existing Clarifier→Planner path with `RequestInput` CP1; enable `ResumabilityConfig`. Validate ADK-owned resume on trivial slice. Keep `SessionStore` writing in parallel (write-through) for safety.
@@ -340,10 +340,26 @@ Code today = v1 (Stories 1–5: `orchestrator.py`, `stage_machine.py` driver, `p
 4. ✅ **Replace checkpoints** with `RequestInput` (CP2, CP3 + CP3 input adapter); delete console `checkpoint.py` once parity proven *(delete deferred to step 7 — still imported by v1 shell)*.
 5. ✅ **Flip session ownership** to ADK; demote `SessionStore` to export callback/plugin (`SessionExporterPlugin`); retire `stage.json`-based resume.
 6. ✅ **Expose A2A** — landed as unified `get_fast_api_app(a2a=True)` (REST + A2A in one localhost process) over `to_a2a`; add agent card; wire thin CLI to `/run_sse` (§13 "As built").
-7. ⏳ **Retire** `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` + console `checkpoint.py` once workflow = sole driver (= E5.S1).
+7. ✅ **Retired** `orchestrator.py` + `stage_machine.py` driver + `pipeline.py` `_run_sync` + console `checkpoint.py` (E5.S1, 2026-06-28) — whole-file deletes, zero live imports remain repo-wide.
 
-Acceptance: AC1–AC7 must still pass end-to-end; resume-by-`invocation_id` + localhost A2A round-trip = new acceptance checks.
+Acceptance: AC1–AC7 must still pass end-to-end; resume-by-`invocation_id` + localhost A2A round-trip = new acceptance checks. Harness code-complete (E5.S2/P7); real-HW `pytest -m live` run still owned by user.
 
 ---
 
-**Next step:** §15 steps 1–6 done (E0–E4 on `dev`). Remaining = **E5** — retire v1 shell (§15 step 7 / spawn-doc E5.S1) then prove migration E2E on real hardware (AC1–AC7 + resume + A2A round-trip + OOM; needs E0.S3 model pull). Plans: [../claudedocs/workflow_v1_to_v2_migration.md] (P6/P7) + [../claudedocs/spawn_v1_to_v2_migration.md] (E5).
+**Next step:** migration (§15) fully closed. Post-migration work tracked in §16.
+
+## 16. Post-Migration Hardening (2026-06-30 → 2026-07-04, NEW)
+
+Three follow-on passes after migration code-complete, all additive to the v2 shell — no architectural change to §2–§14.
+
+1. **Acceptance-runbook bugfixes (2026-06-30, `2871366`)** — three bugs found *running* the E5.S2 runbook, not in the harness design: (a) `server.py` passed `a2a=True` straight into `get_fast_api_app`, hitting the ADK 2.3.0 `import json`-shadow `UnboundLocalError` again in a code path the earlier `_mount_a2a` workaround didn't cover — fixed by calling `get_fast_api_app(a2a=False)` and letting `_mount_a2a` wire A2A explicitly, plus an explicit `FileNotFoundError` if the agent card is missing; (b) live A2A round-trip test silently swallowed ADK error SSE events (`{"error": ...}`) via `extra="ignore"`, surfacing a misleading "CP2 not observed" assertion instead of the real cause (e.g. Ollama down) — fixed to detect and raise the real error; (c) two Planner structural tests were constructing a real `LiteLlm` (spawning `aiosqlite` background threads that warned on loop teardown) instead of passing `model="stub-model"`.
+2. **crawl4ai MCP timeout + robustness (2026-07-02, `ffdb978`)** — crawl4ai tool-call timeout raised 5s → 500s (page loads were timing out under real network conditions); `BrowserConfig(verbose=False)` to quiet Playwright chatter; `try/except` added around crawl stages for graceful degrade instead of hard crash. Superseded in part by the resource-optimization pass below (`MCP_TOOL_TIMEOUT_SEC` config knob, default 180s).
+3. **Resource-optimization pass (2026-07-04, `a3e9f86`)** — implements the High/Medium findings of `claudedocs/resource_optimization_plan.md` (M7 + Low severity deferred):
+   - **H1/H2/M1 — shared MCP subprocess.** NEW `app/agents/crawl4ai_toolset.py`: one `build_crawl4ai_toolset()` helper (kills 3x triplicated builder copies) + `MCPSessionManager` caching one crawl4ai stdio subprocess **per `invocation_id`**, shared across Acquirer/Extractor/Verifier's differing `tool_filter` views and kept alive across HITL resume hops (released on real error/completion only, never on a `NodeInterruptedError` pause). Replaces the earlier "build once per run, close in `finally`" pattern from §2/§7 — those now describe the pre-optimization behavior; the toolset now spans the *whole invocation* including resumes, not just one drive-call.
+   - **M2 — persistent crawler.** `mcp/Crawl4AI_MCP/app/crawler.py` (NEW): one long-lived `AsyncWebCrawler` held per MCP server process, replacing per-tool-call Chromium launch/teardown.
+   - **M3 — coarser ledger emission.** `v2_ledger` state now emitted once per subtopic (milestone), not every inner-loop iteration; final subtopic doubles as run-end flush.
+   - **M4 — retention pruning.** NEW `app/maintenance.py` — explicit, opt-in pruning of the sessions DB + per-session export dirs, gated by `SESSION_RETENTION_DAYS` (default 0 = disabled). Not wired into any startup path.
+   - **M5/M6 — TracePlugin fixes.** NEW `app/trace_plugin.py` (a pre-existing tracing baseline, formalized here): pops its `_starts` span-tracking dict on model/tool **error** callbacks too (was leaking on the error path), and holds one open per-session file handle instead of open/write/close+mkdir on every callback.
+   - Net: MCP tool-call timeout now config-driven (`MCP_TOOL_TIMEOUT_SEC`, default 180s, down from the 500s worst-case in the prior fix). Full suite: 249 passing (2 pre-existing `.env`-gated failures + 2 live-server tests unrelated).
+
+Design docs: [../claudedocs/resource_optimization_plan.md] (source plan for this section).

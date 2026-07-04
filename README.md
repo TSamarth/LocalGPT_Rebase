@@ -82,7 +82,7 @@ Live acceptance tests (real Ollama, real crawling) are opt-in: `pytest -m live` 
 
 ## Status
 
-v1→v2 (ADK 2.x dynamic-workflow) migration is code-complete: offline suite green (232 orchestrator + 43 MCP tests), all hard gates (resume, parity, byte-comparable export, A2A HITL round-trip) passed. Remaining: user-run live acceptance (`pytest -m live`) on real hardware. See [`memory-bank/progress.md`](memory-bank/progress.md) for full history.
+v1→v2 (ADK 2.x dynamic-workflow) migration is code-complete and the v1 shell has been deleted. A follow-on resource-optimization pass (2026-07-04) shares one crawl4ai MCP subprocess per run across HITL resume hops, holds a persistent crawler process, and adds opt-in session retention pruning. Offline suite: 253 collected / 249 passing orchestrator + 43 MCP tests. All hard gates (resume, parity, byte-comparable export, A2A HITL round-trip) passed. Remaining: user-run live acceptance (`pytest -m live`) on real hardware. See [`memory-bank/progress.md`](memory-bank/progress.md) for full history.
 
 ## Docs
 
