@@ -178,6 +178,30 @@ def test_heuristic_score_cleaned_query_qualifies_where_raw_did_not():
     assert cleaned_score >= 0.3
 
 
+@pytest.mark.asyncio
+async def test_default_score_threshold_is_point_three():
+    """Default score_threshold (unset) should qualify a 0.35-scored URL."""
+    from app.tools.triage import score_and_triage_urls
+
+    head_results = [
+        {
+            "url": "https://example.com/page1",
+            "status": "valid",
+            "head_data": {"title": "Page 1", "meta": {"description": "About page 1"}},
+            "relevance_score": 0.35,
+        },
+    ]
+
+    with patch("app.tools.triage.AsyncUrlSeeder", _fake_seeder(head_results)):
+        result = await score_and_triage_urls(
+            urls=["https://example.com/page1"],
+            query="test research",
+        )
+
+    qualified_urls = {e["url"] for e in result["qualified_urls"]}
+    assert "https://example.com/page1" in qualified_urls
+
+
 def test_recommend_strategy_lowered_crawl_url_floor():
     """crawl_url floor should now be 0.25 -> 0.3 clears it (was skip before)."""
     from app.tools.triage import _recommend_strategy

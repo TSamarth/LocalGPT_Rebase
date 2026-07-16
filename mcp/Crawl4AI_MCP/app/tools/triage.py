@@ -48,7 +48,7 @@ def _recommend_strategy(url: str, score: float) -> str:
 async def score_and_triage_urls(
     urls: List[str],
     query: str,
-    score_threshold: float = 0.5,
+    score_threshold: float = 0.3,
     include_patterns: Optional[List[str]] = None,
     exclude_patterns: Optional[List[str]] = None,
     max_links: int = 50,
