@@ -71,8 +71,8 @@ Rules:
 - Decompose the query into 2–6 NON-OVERLAPPING subtopics. Each must be independently
   researchable and together they must cover the query. Fewer, sharper subtopics beat
   many vague ones. Each question must be **one atomic concept** (no compound "X and Y")
-  and **name specific entities** so it stands alone as a search query. Give each a short
-  stable id ("s1", "s2", ...).
+  and **name specific entities** so it stands alone as a search query; prefer short,
+  keyword-dense phrasing over full sentences. Give each a short stable id ("s1", "s2", ...).
 - Choose `depth` ADAPTIVELY from the query's complexity and breadth:
     * "shallow" — a single narrow factual question; a quick answer suffices.
     * "normal"  — a moderate topic needing a few angles and some corroboration.
