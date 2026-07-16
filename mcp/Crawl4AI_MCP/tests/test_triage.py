@@ -145,3 +145,42 @@ async def test_triage_strategy_recommendation():
     assert _recommend_strategy("https://blog.example.com/post/hello", 0.65) == "deep_crawl"
     assert _recommend_strategy("https://example.com/article", 0.45) == "crawl_url"
     assert _recommend_strategy("https://example.com/page", 0.1) == "skip"
+
+
+def test_query_keywords_strips_stopwords():
+    """_query_keywords should drop stopwords/interrogatives, keep content tokens."""
+    from app.tools.triage import _query_keywords
+
+    tokens = set(_query_keywords("Why did Mongol invade Japan in 1274").split())
+    assert {"mongol", "invade", "japan", "1274"} <= tokens
+    assert not ({"why", "did", "in"} & tokens)
+
+
+def test_query_keywords_falls_back_when_all_stopwords():
+    """If cleaning removes everything, fall back to the original query string."""
+    from app.tools.triage import _query_keywords
+
+    original = "Why did the it"
+    assert _query_keywords(original) == original
+
+
+def test_heuristic_score_cleaned_query_qualifies_where_raw_did_not():
+    """Cleaned query should clear 0.3 threshold where the raw question did not."""
+    from app.tools.triage import _heuristic_score, _query_keywords
+
+    wiki_url = "https://en.wikipedia.org/wiki/Mongol_invasions_of_Japan"
+    q = "Why did Mongol invade Japan in 1274"
+
+    raw_score = _heuristic_score(wiki_url, q)
+    cleaned_score = _heuristic_score(wiki_url, _query_keywords(q))
+
+    assert raw_score < 0.3
+    assert cleaned_score >= 0.3
+
+
+def test_recommend_strategy_lowered_crawl_url_floor():
+    """crawl_url floor should now be 0.25 -> 0.3 clears it (was skip before)."""
+    from app.tools.triage import _recommend_strategy
+
+    wiki_url = "https://en.wikipedia.org/wiki/Mongol_invasions_of_Japan"
+    assert _recommend_strategy(wiki_url, 0.3) == "crawl_url"

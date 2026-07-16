@@ -13,6 +13,19 @@ from crawl4ai import SeedingConfig
 from crawl4ai.async_url_seeder import AsyncUrlSeeder
 from fastmcp import Context
 
+_STOPWORDS = frozenset({
+    "why", "did", "do", "does", "how", "what", "when", "where", "who", "whom",
+    "which", "is", "are", "was", "were", "be", "the", "a", "an", "of", "in",
+    "on", "to", "for", "and", "or", "with", "at", "by", "from", "as", "that",
+    "this", "it", "its", "into",
+})
+
+
+def _query_keywords(query: str) -> str:
+    """Strip stopwords/interrogatives so BM25 sees content tokens only."""
+    tokens = [w for w in query.lower().split() if w not in _STOPWORDS]
+    return " ".join(tokens) if tokens else query
+
 
 def _recommend_strategy(url: str, score: float) -> str:
     """Heuristic: recommend crawl strategy based on score and URL shape."""
@@ -27,7 +40,7 @@ def _recommend_strategy(url: str, score: float) -> str:
         return "adaptive_crawl"
     if score >= 0.55 and (is_doc_site or is_blog):
         return "deep_crawl"
-    if score >= 0.35:
+    if score >= 0.25:
         return "crawl_url"
     return "skip"
 
@@ -69,11 +82,13 @@ async def score_and_triage_urls(
     if ctx:
         await ctx.info(f"Triaging {len(urls)} URLs for query: '{query}'")
 
+    scoring_query = _query_keywords(query)
+
     seed_cfg = SeedingConfig(
         extract_head=True,
         concurrency=concurrency,
         verbose=False,
-        query=query,
+        query=scoring_query,
         scoring_method="bm25",
     )
 
@@ -95,7 +110,7 @@ async def score_and_triage_urls(
         if entry.get("status") != "valid":
             scored_map[url] = {
                 "url": url,
-                "total_score": _heuristic_score(url, query),
+                "total_score": _heuristic_score(url, scoring_query),
                 "intrinsic_score": 0.0,
                 "contextual_score": 0.0,
                 "title": "",
@@ -107,7 +122,7 @@ async def score_and_triage_urls(
         head = entry.get("head_data", {}) or {}
         # relevance_score is BM25 over title/meta text vs. query, already in [0, 1]
         contextual_score = entry.get("relevance_score")
-        total_score = contextual_score if contextual_score is not None else _heuristic_score(url, query)
+        total_score = contextual_score if contextual_score is not None else _heuristic_score(url, scoring_query)
         scored_map[url] = {
             "url": url,
             "total_score": total_score,
@@ -123,7 +138,7 @@ async def score_and_triage_urls(
         if url not in scored_map:
             scored_map[url] = {
                 "url": url,
-                "total_score": _heuristic_score(url, query),
+                "total_score": _heuristic_score(url, scoring_query),
                 "intrinsic_score": 0.0,
                 "contextual_score": 0.0,
                 "title": "",
