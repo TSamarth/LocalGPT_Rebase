@@ -50,6 +50,7 @@ async def deep_crawl(
     score_threshold: float = 0.0,
     cache_mode: Optional[str] = None,
     use_llm_extraction: Optional[bool] = None,
+    publication_date: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
@@ -74,6 +75,7 @@ async def deep_crawl(
         cache_mode: Override cache behaviour: enabled | bypass | disabled.
         use_llm_extraction: Apply LLM extraction for richer chunks (overrides
             config.LLM_EXTRACTION_ENABLED when specified).
+        publication_date: Optional publication date to attach to stored chunk metadata.
 
     Returns:
         Dict with pages list, aggregated stats, and crawl summary.
@@ -138,7 +140,7 @@ async def deep_crawl(
                     await ctx.warning(f"  Error crawling {url}: {e}")
                 continue
 
-            page_id = await _persist_result(result, session_id, "deep_crawl", query)
+            page_id = await _persist_result(result, session_id, "deep_crawl", query, publication_date=publication_date)
             results_out.append(_format_result(result, page_id))
             deepest_depth = max(deepest_depth, depth)
 
@@ -180,6 +182,7 @@ async def deep_crawl(
 
     return {
         "pages": results_out,
+        "page_ids": [r["page_id"] for r in results_out],
         "stats": {
             "seed_url": seed_url,
             "total_pages": len(results_out),

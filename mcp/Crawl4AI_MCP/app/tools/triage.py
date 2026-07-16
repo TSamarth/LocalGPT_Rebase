@@ -1,19 +1,17 @@
 """
 URL scoring and triage tool.
-Uses Crawl4AI's LinkPreviewConfig + score_links to evaluate and rank URLs
-before deep crawling. Recommends the best crawl strategy per URL.
+Uses Crawl4AI's AsyncUrlSeeder to BM25-score URLs directly against the query
+(via each URL's own <head> title/description) before deep crawling.
+Recommends the best crawl strategy per URL.
 """
 from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional
 
-from crawl4ai import CrawlerRunConfig, LinkPreviewConfig
+from crawl4ai import SeedingConfig
+from crawl4ai.async_url_seeder import AsyncUrlSeeder
 from fastmcp import Context
-
-from app.config import config
-from app.crawler import shared_crawler
-from app.utils import get_cache_mode
 
 
 def _recommend_strategy(url: str, score: float) -> str:
@@ -37,7 +35,7 @@ def _recommend_strategy(url: str, score: float) -> str:
 async def score_and_triage_urls(
     urls: List[str],
     query: str,
-    score_threshold: float = 0.3,
+    score_threshold: float = 0.5,
     include_patterns: Optional[List[str]] = None,
     exclude_patterns: Optional[List[str]] = None,
     max_links: int = 50,
@@ -45,13 +43,10 @@ async def score_and_triage_urls(
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
-    Score and triage a list of URLs using Crawl4AI's link preview scoring.
+    Score and triage a list of URLs using Crawl4AI's BM25 head scoring.
 
-    For each URL in the list, crawls it with score_links=True and
-    LinkPreviewConfig to fetch head data (title, description) and compute:
-    - intrinsic_score: URL quality & structural context (0–10)
-    - contextual_score: BM25 relevance to query (0–1)
-    - total_score: weighted combination (intrinsic×0.3 + contextual×0.7)
+    Fetches each URL's own <head> (title, meta description) via AsyncUrlSeeder
+    and BM25-scores it against the query directly -- total_score lands in [0, 1].
 
     Returns qualified URLs (above threshold) with recommended crawl strategy.
 
@@ -59,9 +54,9 @@ async def score_and_triage_urls(
         urls: Raw de-duplicated URL list from web search.
         query: Research query for BM25 contextual scoring.
         score_threshold: Minimum total_score to qualify a URL (default 0.3).
-        include_patterns: URL glob patterns to include (e.g. ["*/docs/*"]).
-        exclude_patterns: URL glob patterns to exclude (e.g. ["*/login*"]).
-        max_links: Max links to evaluate per page (default 50).
+        include_patterns: Unused (kept for backward-compat call signature).
+        exclude_patterns: Unused (kept for backward-compat call signature).
+        max_links: Unused (kept for backward-compat call signature).
         concurrency: Head-request concurrency (default 10).
 
     Returns:
@@ -74,104 +69,56 @@ async def score_and_triage_urls(
     if ctx:
         await ctx.info(f"Triaging {len(urls)} URLs for query: '{query}'")
 
-    link_preview_cfg = LinkPreviewConfig(
-        verbose=False,
-        include_internal=True,
-        include_external=True,
-        max_links=max_links,
-        include_patterns=include_patterns or [],
-        exclude_patterns=exclude_patterns or [],
+    seed_cfg = SeedingConfig(
+        extract_head=True,
         concurrency=concurrency,
-        timeout=15,
-        query=query,
-        score_threshold=0.0,  # We apply our own threshold after
-    )
-
-    run_cfg = CrawlerRunConfig(
-        score_links=True,
-        link_preview_config=link_preview_cfg,
-        cache_mode=get_cache_mode(config.CACHE_MODE),
-        page_timeout=config.PAGE_TIMEOUT_MS,
-        excluded_tags=["nav", "footer", "script", "style"],
         verbose=False,
+        query=query,
+        scoring_method="bm25",
     )
 
-    # Build a set for O(1) lookup
-    url_set = set(urls)
     scored_map: Dict[str, Dict] = {}
 
-    async with shared_crawler() as crawler:
-        for i, url in enumerate(urls):
-            if ctx:
-                await ctx.info(f"  Scoring {i+1}/{len(urls)}: {url}")
-            try:
-                result = await crawler.arun(url, config=run_cfg)
-                if not result.success:
-                    scored_map[url] = {
-                        "url": url,
-                        "total_score": 0.0,
-                        "intrinsic_score": 0.0,
-                        "contextual_score": 0.0,
-                        "title": "",
-                        "description": "",
-                        "error": result.error_message,
-                    }
-                    continue
+    async with AsyncUrlSeeder() as seeder:
+        try:
+            head_results = await seeder.extract_head_for_urls(
+                urls, config=seed_cfg, concurrency=concurrency, timeout=15
+            )
+        except Exception as e:
+            head_results = [
+                {"url": url, "status": "failed", "head_data": {}, "error": str(e)}
+                for url in urls
+            ]
 
-                # Collect all links and find ones that match our input URL list
-                all_links = (
-                    result.links.get("internal", []) + result.links.get("external", [])
-                )
+    for entry in head_results:
+        url = str(entry["url"])
+        if entry.get("status") != "valid":
+            scored_map[url] = {
+                "url": url,
+                "total_score": _heuristic_score(url, query),
+                "intrinsic_score": 0.0,
+                "contextual_score": 0.0,
+                "title": "",
+                "description": "",
+                "error": entry.get("error"),
+            }
+            continue
 
-                # Also score the page itself
-                page_title = (result.metadata or {}).get("title", "") if result.metadata else ""
-                page_desc = (result.metadata or {}).get("description", "") if result.metadata else ""
+        head = entry.get("head_data", {}) or {}
+        # relevance_score is BM25 over title/meta text vs. query, already in [0, 1]
+        contextual_score = entry.get("relevance_score")
+        total_score = contextual_score if contextual_score is not None else _heuristic_score(url, query)
+        scored_map[url] = {
+            "url": url,
+            "total_score": total_score,
+            "intrinsic_score": 0.0,
+            "contextual_score": contextual_score or 0.0,
+            "title": head.get("title") or "",
+            "description": (head.get("meta") or {}).get("description", ""),
+            "error": None,
+        }
 
-                # Find if this URL appears in scored links from its own page
-                self_score = 0.0
-                for lnk in all_links:
-                    href = lnk.get("href", "")
-                    if href == url or href.rstrip("/") == url.rstrip("/"):
-                        self_score = lnk.get("total_score", 0.0)
-                        break
-
-                scored_map[url] = {
-                    "url": url,
-                    "total_score": self_score if self_score > 0 else _heuristic_score(url, query),
-                    "intrinsic_score": 5.0,  # default when self-scored
-                    "contextual_score": self_score,
-                    "title": page_title,
-                    "description": page_desc,
-                    "error": None,
-                }
-
-                # Also capture any input URLs that appear as links on this page
-                for lnk in all_links:
-                    href = lnk.get("href", "")
-                    if href in url_set and href not in scored_map:
-                        head = lnk.get("head_data", {}) or {}
-                        scored_map[href] = {
-                            "url": href,
-                            "total_score": lnk.get("total_score", 0.0),
-                            "intrinsic_score": lnk.get("intrinsic_score", 0.0),
-                            "contextual_score": lnk.get("contextual_score", 0.0),
-                            "title": head.get("title", ""),
-                            "description": (head.get("meta") or {}).get("description", ""),
-                            "error": None,
-                        }
-
-            except Exception as e:
-                scored_map[url] = {
-                    "url": url,
-                    "total_score": 0.0,
-                    "intrinsic_score": 0.0,
-                    "contextual_score": 0.0,
-                    "title": "",
-                    "description": "",
-                    "error": str(e),
-                }
-
-    # Fill any URLs not yet scored
+    # Fill any URLs not yet scored (shouldn't normally happen)
     for url in urls:
         if url not in scored_map:
             scored_map[url] = {
@@ -191,9 +138,20 @@ async def score_and_triage_urls(
         strategy = _recommend_strategy(entry["url"], entry["total_score"])
         entry["recommended_strategy"] = strategy
         if entry["total_score"] >= score_threshold and strategy != "skip":
+            entry["description"] = (entry.get("description") or "")[:200]
             qualified.append(entry)
         else:
-            disqualified.append(entry)
+            # Disqualified entries are discarded by the acquirer anyway --
+            # keep only what's needed to explain why, dropping title/description
+            # (which can carry KB-sized junk, e.g. hashtag-wall pages).
+            slim = {
+                "url": entry["url"],
+                "total_score": entry["total_score"],
+                "recommended_strategy": strategy,
+            }
+            if entry.get("error"):
+                slim["error"] = entry["error"][:120]
+            disqualified.append(slim)
 
     # Sort qualified by score desc
     qualified.sort(key=lambda x: x["total_score"], reverse=True)

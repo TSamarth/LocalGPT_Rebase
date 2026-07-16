@@ -101,6 +101,9 @@ Do NOT decide a claim's final status, confidence_score, or conflict_type yoursel
 deterministic policy downstream computes those from source independence, recency,
 and the methodological signal. You only surface the evidence faithfully.
 
+If you call `search_chunks` yourself, request `n_results=5-6` — chunk text is
+already capped server-side, so a modest count keeps the total retrieval bounded.
+
 Return ONLY a JSON object conforming to this schema (no prose, no markdown):
 
 {

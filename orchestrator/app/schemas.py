@@ -98,6 +98,7 @@ class ResearchPlan(BaseModel):
 class ScoredURL(BaseModel):
     """A triaged candidate URL from discover_urls + score_and_triage_urls."""
     url: str
+    query: str = ""                        # the research question — passed to crawl tools, never the page title
     score: float
     strategy: CrawlStrategy
     source: str = ""                       # discovery source that found it

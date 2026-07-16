@@ -83,13 +83,19 @@ Your job, in order:
    URLs across the requested source classes (web search, DuckDuckGo, arXiv),
    max_results_per_source = 3 and max_total =10.
 2. Second, call the `score_and_triage_urls` tool on those candidates. It scores each URL
-   for relevance and assigns a crawl `strategy`.
+   for relevance and assigns a crawl `strategy`. Its response uses different field
+   names than your output — map them exactly:
+     - triage's `total_score`            -> your `score`
+     - triage's `recommended_strategy`   -> your `strategy`
 3. Return the triaged candidates as a JSON array of ScoredURL records. Each record:
 
    {
      "url": "https://...",
-     "score": 0.0,                         // 0-1 relevance from triage
-     "strategy": "adaptive_crawl" | "deep_crawl" | "crawl_url" | "skip",
+     "query": "the ORIGINAL research question, verbatim — copy the Question: line
+               from your input into every record; never the page title or a
+               paraphrase",
+     "score": 0.0,                         // from triage's total_score
+     "strategy": "adaptive_crawl" | "deep_crawl" | "crawl_url" | "skip",  // from triage's recommended_strategy
      "source": "the discovery source that found it",
      "also_in": [],                        // other sources that also found it
      "etld1": "the registrable domain"
@@ -102,7 +108,8 @@ Example of a correct run (your only allowed actions):
   step 1: call tool discover_urls(query="What are the trade-offs of vector databases?", max_total=10, max_results_per_source=3, ...)
   step 2: call tool score_and_triage_urls(urls=[...the discovered URLs...])
   step 3: final response is EXACTLY the triaged records as a JSON array:
-          [{"url": "https://example.com/a", "score": 0.9, "strategy": "crawl_url",
+          [{"url": "https://example.com/a", "query": "What are the trade-offs of vector databases?",
+            "score": 0.9, "strategy": "crawl_url",
             "source": "web_search", "also_in": [], "etld1": "example.com"}]
 
 Rules:
@@ -111,9 +118,12 @@ Rules:
   `score_and_triage_urls` and return their triaged result as JSON — you never
   answer, summarize, or discuss the question itself.
 - You hold no crawl tools — never attempt to crawl or fetch page content.
+- Every record's `query` MUST be the original research question — never the page
+  title, a URL fragment, or anything triage returned.
 - Deduplicate URLs: one record per URL. If several discovery sources found the
   same URL, keep one record and list the extra sources in `also_in`.
-- Do not fabricate scores or strategies — use what the triage tool returns.
+- Do not fabricate scores or strategies — use what the triage tool returns
+  (`total_score`/`recommended_strategy`), just renamed per the mapping above.
 - Output ONLY the JSON array of ScoredURL records and nothing else.
 - CRITICAL: If a tool fails or returns no results, output an empty JSON array: []
 - CRITICAL: Never output prose, markdown fences, or explanations — raw JSON only.
@@ -244,6 +254,7 @@ async def enrich_with_citations(
             enriched.append(
                 ScoredURL(
                     url=url,
+                    query=seed.query,
                     score=seed.score,
                     strategy=CrawlStrategy.CRAWL,
                     source="citation_bfs",

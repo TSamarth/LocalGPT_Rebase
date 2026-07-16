@@ -38,6 +38,46 @@ async def test_search_chunks_returns_results(client):
 
 
 @pytest.mark.asyncio
+async def test_search_chunks_truncates_long_text():
+    """search_chunks should truncate chunk text to max_chars_per_chunk (default 600)."""
+    from app.tools.search import search_chunks
+
+    long_text = "a" * 5000
+    mock_chunks = [
+        {"id": "c1", "text": long_text, "score": 0.9, "metadata": {}},
+    ]
+
+    with patch("app.tools.search.get_chroma") as mock_chroma_fn:
+        mock_chroma = MagicMock()
+        mock_chroma.search.return_value = mock_chunks
+        mock_chroma_fn.return_value = mock_chroma
+
+        result = await search_chunks(query="test")
+
+    assert len(result["chunks"][0]["text"]) == 600
+
+
+@pytest.mark.asyncio
+async def test_search_chunks_respects_custom_max_chars():
+    from app.tools.search import search_chunks
+
+    mock_chunks = [
+        {"id": "c1", "text": "b" * 1000, "score": 0.9, "metadata": {"k": "v"}},
+    ]
+
+    with patch("app.tools.search.get_chroma") as mock_chroma_fn:
+        mock_chroma = MagicMock()
+        mock_chroma.search.return_value = mock_chunks
+        mock_chroma_fn.return_value = mock_chroma
+
+        result = await search_chunks(query="test", max_chars_per_chunk=50)
+
+    chunk = result["chunks"][0]
+    assert len(chunk["text"]) == 50
+    assert chunk["metadata"] == {"k": "v"}
+
+
+@pytest.mark.asyncio
 async def test_get_crawl_stats_returns_stats(client):
     """get_crawl_stats should return sqlite and chromadb stats."""
     mock_stats = {

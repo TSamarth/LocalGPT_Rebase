@@ -76,6 +76,46 @@ async def test_crawl_many_empty_urls(client):
 
 
 @pytest.mark.asyncio
+async def test_persist_result_publication_date_in_metadata():
+    """_persist_result should include publication_date in chunk metadata when given."""
+    from app.tools.crawl import _persist_result
+
+    mock_result = _mock_crawl_result("https://example.com")
+    mock_result.extracted_content = None
+
+    mock_store = AsyncMock()
+    mock_chroma = MagicMock()
+
+    with patch("app.tools.crawl.get_store", AsyncMock(return_value=mock_store)), \
+         patch("app.tools.crawl.get_chroma", return_value=mock_chroma):
+        await _persist_result(
+            mock_result, "sess", "crawl_url", "query", publication_date="2024-01-01"
+        )
+
+    _, _, metadatas = mock_chroma.add_chunks.call_args[0]
+    assert all(m["publication_date"] == "2024-01-01" for m in metadatas)
+
+
+@pytest.mark.asyncio
+async def test_persist_result_no_publication_date_key_when_absent():
+    """_persist_result should omit publication_date from chunk metadata when not given."""
+    from app.tools.crawl import _persist_result
+
+    mock_result = _mock_crawl_result("https://example.com")
+    mock_result.extracted_content = None
+
+    mock_store = AsyncMock()
+    mock_chroma = MagicMock()
+
+    with patch("app.tools.crawl.get_store", AsyncMock(return_value=mock_store)), \
+         patch("app.tools.crawl.get_chroma", return_value=mock_chroma):
+        await _persist_result(mock_result, "sess", "crawl_url", "query")
+
+    _, _, metadatas = mock_chroma.add_chunks.call_args[0]
+    assert all("publication_date" not in m for m in metadatas)
+
+
+@pytest.mark.asyncio
 async def test_crawl_url_registered(client):
     """crawl_url should be registered as a tool."""
     tools = await client.list_tools()

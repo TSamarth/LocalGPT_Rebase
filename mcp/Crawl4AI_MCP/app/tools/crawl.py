@@ -145,7 +145,7 @@ def _build_run_config(
     )
 
 
-def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, session_id: Optional[str], query: Optional[str], strategy: str, page_id: str) -> tuple[List[str], List[str], List[Dict]]:
+def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, session_id: Optional[str], query: Optional[str], strategy: str, page_id: str, publication_date: Optional[str] = None) -> tuple[List[str], List[str], List[Dict]]:
     """Parse result.extracted_content (JSON from LLMExtractionStrategy) into chunk records.
 
     Returns (chunk_ids, chunk_texts, metadatas) ready for ChromaDB + SQLite.
@@ -181,7 +181,7 @@ def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, se
         cid = make_id()
         chunk_ids.append(cid)
         chunk_texts.append(text)
-        metadatas.append({
+        metadata = {
             "url": url,
             "title": title,
             "session_id": session_id or "",
@@ -191,7 +191,10 @@ def _parse_llm_extracted_chunks(extracted_content: str, url: str, title: str, se
             "page_id": page_id,
             "etld1": etld1,
             "extraction": "llm",
-        })
+        }
+        if publication_date is not None:
+            metadata["publication_date"] = publication_date
+        metadatas.append(metadata)
 
     return chunk_ids, chunk_texts, metadatas
 
@@ -202,6 +205,7 @@ async def _persist_result(
     strategy: str,
     query: Optional[str],
     total_score: float = 0.0,
+    publication_date: Optional[str] = None,
 ) -> str:
     """Save crawl result to SQLite and ChromaDB. Returns page_id.
 
@@ -255,7 +259,7 @@ async def _persist_result(
     if extracted:
         # Path 1: LLM extraction — parse blocks from result.extracted_content
         chunk_ids, chunk_texts_list, metadatas = _parse_llm_extracted_chunks(
-            extracted, result.url, title, session_id, query, strategy, page_id
+            extracted, result.url, title, session_id, query, strategy, page_id, publication_date
         )
         if chunk_ids:
             chroma = get_chroma()
@@ -285,8 +289,9 @@ async def _persist_result(
             etld1 = registrable_domain(result.url)
             chunk_ids = [make_id() for _ in chunks]
             c_texts = [c.text for c in chunks]
-            metadatas = [
-                {
+
+            def _build_metadata(c: Any) -> Dict[str, Any]:
+                metadata = {
                     "url": result.url,
                     "title": title,
                     "session_id": session_id or "",
@@ -297,8 +302,11 @@ async def _persist_result(
                     "etld1": etld1,
                     "extraction": config.CHUNKING_STRATEGY,
                 }
-                for c in chunks
-            ]
+                if publication_date is not None:
+                    metadata["publication_date"] = publication_date
+                return metadata
+
+            metadatas = [_build_metadata(c) for c in chunks]
             try:
                 chroma.add_chunks(chunk_ids, c_texts, metadatas)
             except Exception:
@@ -378,6 +386,7 @@ async def crawl_url(
     wait_for: Optional[str] = None,
     js_code: Optional[str] = None,
     use_llm_extraction: Optional[bool] = None,
+    publication_date: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
@@ -402,6 +411,7 @@ async def crawl_url(
         js_code: JavaScript to execute after page load.
         use_llm_extraction: Apply LLM extraction for richer chunks (overrides
             config.LLM_EXTRACTION_ENABLED when specified).
+        publication_date: Optional publication date to attach to stored chunk metadata.
 
     Returns:
         Dict with success, url, title, page_id, fit_preview, links, metadata.
@@ -445,7 +455,7 @@ async def crawl_url(
 
         result = await crawl_with_retry(_do, ctx=ctx)
 
-    page_id = await _persist_result(result, session_id, "crawl_url", query)
+    page_id = await _persist_result(result, session_id, "crawl_url", query, publication_date=publication_date)
 
     if ctx:
         status = "✅" if result.success else "❌"

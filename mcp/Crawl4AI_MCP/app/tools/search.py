@@ -16,6 +16,7 @@ async def search_chunks(
     query: str,
     n_results: int = 10,
     session_id: Optional[str] = None,
+    max_chars_per_chunk: int = 600,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
@@ -29,6 +30,9 @@ async def search_chunks(
         query: Search query to find relevant chunks.
         n_results: Number of top results to return (default 10).
         session_id: Filter results to a specific session (optional).
+        max_chars_per_chunk: Truncate each chunk's text to this many
+            characters (default 600) to bound response size at small
+            context windows.
 
     Returns:
         Dict with ranked chunks list and search metadata.
@@ -41,6 +45,10 @@ async def search_chunks(
     try:
         chroma = get_chroma()
         chunks = chroma.search(query=query, n_results=n_results, where=where)
+        for chunk in chunks:
+            text = chunk.get("text")
+            if text:
+                chunk["text"] = text[:max_chars_per_chunk]
     except Exception as e:
         if ctx:
             await ctx.error(f"ChromaDB search failed: {e}")

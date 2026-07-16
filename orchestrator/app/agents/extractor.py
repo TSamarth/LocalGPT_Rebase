@@ -50,8 +50,8 @@ _EXTRACTOR_ROLE_PROMPT = """\
 You are the Extractor in a local deep-research pipeline.
 
 Input: a list of triaged candidate URLs (ScoredURL objects). Each carries a
-`strategy` field that names exactly which crawl tool to use, plus an optional
-`publication_date`.
+`strategy` field that names exactly which crawl tool to use, a `query` field
+(the original research question), plus an optional `publication_date`.
 
 Your job, for EACH input URL, in order:
 1. Read its `strategy`. Map it to the MCP crawl tool to call:
@@ -59,8 +59,13 @@ Your job, for EACH input URL, in order:
      - strategy "deep_crawl"     -> call the `deep_crawl` tool
      - strategy "crawl_url"      -> call the `crawl_url` tool
      - strategy "skip"           -> do NOT crawl it; move on.
-2. Call that one tool on that one URL. The MCP server filters the content,
-   chunks it, embeds it into the vector store, and returns page/chunk IDs.
+2. Call that one tool on that one URL, passing the URL's `query` field as the
+   tool's `query` argument UNCHANGED. NEVER substitute the page title, a URL
+   fragment, or any other text for `query` — it must be the exact research
+   question carried on the ScoredURL. The MCP server filters the content,
+   chunks it, embeds it into the vector store, and returns a page id:
+     - `adaptive_crawl` / `deep_crawl` -> a `page_ids` list in the response
+     - `crawl_url`                     -> a single `page_id` field in the response
 3. If the URL has a `publication_date`, pass it through unchanged in the crawl's
    chunk metadata so it is stored alongside the chunks. NEVER guess, infer, or
    fabricate a date. If a URL has no `publication_date`, write no date for it.
@@ -68,9 +73,12 @@ Your job, for EACH input URL, in order:
 Rules:
 - Use ONLY the crawl tool named by each URL's `strategy`. Do not substitute a
   different tool or crawl a URL marked `skip`.
+- Always pass the ScoredURL's `query` field as the tool's `query` argument —
+  never the page title or anything else.
 - Do not summarise or rewrite page content yourself — the MCP tools do the
   content filtering. Hand downstream the returned page/chunk IDs, not raw text.
-- When every non-skipped URL has been crawled, report the page IDs you created.
+- When every non-skipped URL has been crawled, report the page IDs you created
+  (collect every tool's `page_id`/`page_ids` into one flat list).
 - Your final response MUST be ONLY a JSON array of the created page-id strings —
   e.g. ["page-1", "page-2"] — or [] if nothing was crawled. Never answer the
   research question, summarise findings, or emit any prose before or after it.

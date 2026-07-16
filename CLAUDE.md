@@ -170,3 +170,13 @@ Strong criteria → loop independently. Weak criteria ("make it work") → const
 - `claudedocs/` is listed in `.gitignore`. `git add claudedocs/` fails with "paths are ignored". Use `git add -f claudedocs/<file>` to force-add execution plans and migration docs.
 
 <!-- headroom:learn:end -->
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as GitHub issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

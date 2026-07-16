@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from crawl4ai import AdaptiveCrawler
+from crawl4ai import AdaptiveCrawler, AdaptiveConfig
 from fastmcp import Context
 
 from app.config import config
@@ -31,6 +31,7 @@ async def adaptive_crawl(
     session_id: Optional[str] = None,
     target_confidence: float = 0.8,
     max_pages: int = 30,
+    publication_date: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
@@ -50,6 +51,7 @@ async def adaptive_crawl(
         session_id: Research session identifier for storage grouping.
         target_confidence: Confidence threshold to stop early (0.0–1.0, default 0.8).
         max_pages: Safety cap on total pages crawled (default 30).
+        publication_date: Optional publication date to attach to stored chunk metadata.
 
     Returns:
         Dict with crawled_urls, confidence_achieved, aggregated content, and stats.
@@ -63,10 +65,13 @@ async def adaptive_crawl(
     crawled_urls: List[str] = []
     aggregated_fit_markdown: List[str] = []
     pages_with_content = 0
+    page_ids: List[str] = []
+    adaptive_cfg = AdaptiveConfig(max_pages=max_pages, confidence_threshold=target_confidence,
+                                  embedding_model=config.OLLAMA_EMBED_MODEL)
 
     try:
         async with shared_crawler() as crawler:
-            adaptive = AdaptiveCrawler(crawler, max_pages=max_pages)
+            adaptive = AdaptiveCrawler(crawler, config=adaptive_cfg)
 
             digest_result = await adaptive.digest(
                 start_url=seed_url,
@@ -137,6 +142,7 @@ async def adaptive_crawl(
                         status_code=result.status_code,
                         success=result.success,
                     )
+                    page_ids.append(page_id)
 
                     if fit_md.strip():
                         pages_with_content += 1
@@ -146,27 +152,32 @@ async def adaptive_crawl(
                         if chunks:
                             etld1 = registrable_domain(url)
                             chunk_ids = [make_id() for _ in chunks]
+                            chunk_metadatas = []
+                            for c in chunks:
+                                metadata = {
+                                    "url": url,
+                                    "title": title,
+                                    "session_id": session_id or "",
+                                    "query": query,
+                                    "chunk_index": str(c.chunk_index),
+                                    "strategy": "adaptive_crawl",
+                                    "page_id": page_id,
+                                    "etld1": etld1,
+                                    "extraction": config.CHUNKING_STRATEGY,
+                                }
+                                if publication_date is not None:
+                                    metadata["publication_date"] = publication_date
+                                chunk_metadatas.append(metadata)
+
                             try:
                                 chroma.add_chunks(
                                     chunk_ids,
                                     [c.text for c in chunks],
-                                    [
-                                        {
-                                            "url": url,
-                                            "title": title,
-                                            "session_id": session_id or "",
-                                            "query": query,
-                                            "chunk_index": str(c.chunk_index),
-                                            "strategy": "adaptive_crawl",
-                                            "page_id": page_id,
-                                            "etld1": etld1,
-                                            "extraction": config.CHUNKING_STRATEGY,
-                                        }
-                                        for c in chunks
-                                    ],
+                                    chunk_metadatas,
                                 )
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                if ctx:
+                                    await ctx.warning(f"  Failed to embed chunks for {url}: {e}")
 
                             chunk_records = [
                                 {
@@ -211,6 +222,7 @@ async def adaptive_crawl(
         "pages_crawled": len(crawled_urls),
         "pages_with_content": pages_with_content,
         "crawled_urls": crawled_urls,
+        "page_ids": page_ids,
         # Full content is persisted + chunked; retrieve via search_chunks. Only a
         # preview travels in the agent's context to keep the payload small.
         "aggregated_preview": _aggregated[:500],

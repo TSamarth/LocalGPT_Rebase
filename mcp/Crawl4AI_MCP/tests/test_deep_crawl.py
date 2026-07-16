@@ -74,6 +74,53 @@ async def test_deep_crawl_max_pages_respected(client):
 
 
 @pytest.mark.asyncio
+async def test_deep_crawl_page_ids_present():
+    """deep_crawl pages should carry page_id, and top-level page_ids should match."""
+    from app.tools.deep_crawl import deep_crawl
+
+    seed = "https://docs.example.com"
+    seed_page = _mock_page(seed)
+
+    instance = AsyncMock()
+    instance.arun = AsyncMock(return_value=seed_page)
+
+    @asynccontextmanager
+    async def _shared():
+        yield instance
+
+    with patch("app.tools.deep_crawl.shared_crawler", _shared), \
+         patch("app.tools.deep_crawl._persist_result", AsyncMock(return_value="pid-1")):
+        result = await deep_crawl(seed_url=seed, max_pages=1, max_depth=0)
+
+    assert result["pages"][0]["page_id"] == "pid-1"
+    assert result["page_ids"] == ["pid-1"]
+
+
+@pytest.mark.asyncio
+async def test_deep_crawl_publication_date_passthrough():
+    """deep_crawl should pass publication_date through to _persist_result."""
+    from app.tools.deep_crawl import deep_crawl
+
+    seed = "https://docs.example.com"
+    seed_page = _mock_page(seed)
+
+    instance = AsyncMock()
+    instance.arun = AsyncMock(return_value=seed_page)
+
+    @asynccontextmanager
+    async def _shared():
+        yield instance
+
+    mock_persist = AsyncMock(return_value="pid-1")
+
+    with patch("app.tools.deep_crawl.shared_crawler", _shared), \
+         patch("app.tools.deep_crawl._persist_result", mock_persist):
+        await deep_crawl(seed_url=seed, max_pages=1, max_depth=0, publication_date="2024-01-01")
+
+    assert mock_persist.call_args.kwargs["publication_date"] == "2024-01-01"
+
+
+@pytest.mark.asyncio
 async def test_deep_crawl_stay_on_domain():
     """_same_domain should correctly identify same-domain links."""
     from app.tools.deep_crawl import _same_domain
