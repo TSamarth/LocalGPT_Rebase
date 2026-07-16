@@ -57,7 +57,7 @@ Return ONLY a JSON object that conforms to this schema (no prose, no markdown):
   "subtopics": [
     {
       "id": "s1",
-      "question": "a focused sub-question that advances the main query",
+      "question": "one atomic concept; name entities (e.g., 'Mongol invasion Japan 1274')",
       "target_evidence": 3,
       "source_classes": ["web" | "academic" | "code" | "seed", ...]
     }
@@ -70,7 +70,9 @@ Return ONLY a JSON object that conforms to this schema (no prose, no markdown):
 Rules:
 - Decompose the query into 2–6 NON-OVERLAPPING subtopics. Each must be independently
   researchable and together they must cover the query. Fewer, sharper subtopics beat
-  many vague ones. Give each a short stable id ("s1", "s2", ...).
+  many vague ones. Each question must be **one atomic concept** (no compound "X and Y")
+  and **name specific entities** so it stands alone as a search query. Give each a short
+  stable id ("s1", "s2", ...).
 - Choose `depth` ADAPTIVELY from the query's complexity and breadth:
     * "shallow" — a single narrow factual question; a quick answer suffices.
     * "normal"  — a moderate topic needing a few angles and some corroboration.
