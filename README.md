@@ -49,7 +49,7 @@ Sequential node execution is structural, not a shortcut — crawling (Playwright
 orchestrator/       ADK pipeline: app/{workflow,adk_app,server,cli,config,schemas,...}.py, app/agents/{clarifier,planner,acquirer,extractor,verifier,writer}.py
 mcp/Crawl4AI_MCP/    crawl4ai-backed MCP tool server (discover/triage/crawl/search tools)
 memory-bank/         living project docs: projectbrief, productContext, architecture, techContext, progress, requirements
-claudedocs/          execution plans / migration logs (gitignored in places — see CLAUDE.md)
+claudedocs/          execution plans / migration logs (gitignored)
 ```
 
 ## Getting started
@@ -91,4 +91,3 @@ v1→v2 (ADK 2.x dynamic-workflow) migration is code-complete and the v1 shell h
 - [`memory-bank/architecture.md`](memory-bank/architecture.md) — full design, ratified v2
 - [`memory-bank/techContext.md`](memory-bank/techContext.md) — stack, design decisions, repo pointers
 - [`memory-bank/progress.md`](memory-bank/progress.md) — build history, decision log
-- [`CLAUDE.md`](CLAUDE.md) — behavioral guidelines for AI-assisted dev on this repo
